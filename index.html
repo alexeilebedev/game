@@ -117,7 +117,7 @@ function lighten(hex, amt) {
 // ---- Globals ----
 let canvas, ctx;
 let state = null;
-let dictionary = new Set();   // current level's valid-word set (rebuilt per level)
+let dictionary = new Set();   // global validator: any word from words.txt scores
 let themes = null;            // thematic word groups loaded from themes.json
 let syllables = null;         // current level's syllable inventory (cumulative weights)
 let highScores = [];
@@ -136,32 +136,59 @@ async function loadFile(url) {
   return null;
 }
 
-// Each level's theme word list IS the dictionary for that level.
-// installLevel() rebuilds both the dictionary set and the syllable inventory
-// from the chosen theme's words.
-function buildDictionaryFromWords(words) {
+// Build the global validator from words.txt. Any word in this set scores when
+// the player concatenates syllables to form it — independent of the theme.
+function buildDictionaryFromText(text) {
   const set = new Set();
-  for (const raw of words) {
-    const w = (raw || '').toLowerCase().replace(/[^a-zа-яё]/gi, '');
-    if (w.length >= 4) set.add(w);
+  if (!text) return set;
+  for (const raw of text.split(/\r?\n/)) {
+    const w = raw.trim().toLowerCase();
+    if (!w || w.length < 4) continue;
+    if (!/^[a-zа-яё]+$/i.test(w)) continue; // keep clean letter-only entries
+    set.add(w);
   }
   return set;
 }
 
-// Build a frequency-weighted 2/3-letter syllable inventory from a word set.
-// Common substrings get higher weight automatically.
+// Split a word into either 2 or 3 contiguous pieces, each piece between
+// MIN_PART and MAX_PART letters. Returns null for words too short/long to
+// split under those bounds.
+const MIN_PART = 2, MAX_PART = 4;
+function splitWord(word) {
+  const L = word.length;
+  if (L < 2 * MIN_PART || L > 3 * MAX_PART) return null;
+  const opts = [];
+  // 2-partitions
+  for (let p1 = MIN_PART; p1 <= Math.min(MAX_PART, L - MIN_PART); p1++) {
+    const p2 = L - p1;
+    if (p2 >= MIN_PART && p2 <= MAX_PART) opts.push([p1, p2]);
+  }
+  // 3-partitions
+  for (let p1 = MIN_PART; p1 <= MAX_PART; p1++) {
+    for (let p2 = MIN_PART; p2 <= MAX_PART; p2++) {
+      const p3 = L - p1 - p2;
+      if (p3 >= MIN_PART && p3 <= MAX_PART) opts.push([p1, p2, p3]);
+    }
+  }
+  if (!opts.length) return null;
+  const lens = opts[(Math.random() * opts.length) | 0];
+  const out = [];
+  let i = 0;
+  for (const len of lens) { out.push(word.substr(i, len)); i += len; }
+  return out;
+}
+
+// Build the level's syllable inventory by splitting each theme word into
+// 2 or 3 parts. Only those parts appear as cannon ammunition. Common parts
+// (showing up in multiple words) get correspondingly higher frequency.
 function buildSyllablesFromWords(words) {
   const counts = new Map();
   for (const raw of words) {
     const w = (raw || '').toLowerCase();
-    for (const len of [2, 3]) {
-      if (w.length < len) continue;
-      for (let i = 0; i + len <= w.length; i++) {
-        const syl = w.substr(i, len);
-        if (!/^[a-zа-яё]+$/i.test(syl)) continue;
-        counts.set(syl, (counts.get(syl) || 0) + 1);
-      }
-    }
+    if (!/^[a-zа-яё]+$/i.test(w)) continue;
+    const parts = splitWord(w);
+    if (!parts) continue;
+    for (const p of parts) counts.set(p, (counts.get(p) || 0) + 1);
   }
   const items = [];
   let total = 0;
@@ -172,17 +199,36 @@ function buildSyllablesFromWords(words) {
   return { items, total };
 }
 
+// Level sizing: level 1 = 6 words / win at 3; each next level adds 2 words
+// and the win threshold is 50% (rounded up) of the level's word count.
+function levelWordCount(level) { return 6 + 2 * (level - 1); }
+function levelWinTarget(level) { return Math.ceil(levelWordCount(level) / 2); }
+
 // Pick the theme for a given level. Themes rotate (level N → theme (N-1) % T).
-// Returns { name, words } — the words are both the dictionary and the syllable
-// source for this level.
+// Returns { name, words } — words are picked from the theme, sized to
+// levelWordCount(level).
 function pickLevelSource(level) {
   if (!themes || !themes.length) {
     console.error('No themes loaded — run build_themes.py to fetch themes.json.');
     return { name: '', words: [] };
   }
   const t = themes[(level - 1) % themes.length];
-  const words = (t.words || []).filter(w => typeof w === 'string' && w.length >= 4);
-  return { name: t.name || ('Theme ' + level), words };
+  const pool = (t.words || []).filter(w => typeof w === 'string' && w.length >= 4);
+  const want = levelWordCount(level);
+  // Sample without replacement from the theme's pool.
+  const out = [];
+  const seen = new Set();
+  while (out.length < want && pool.length) {
+    const w = pool[(Math.random() * pool.length) | 0];
+    if (seen.has(w)) {
+      // If the pool is smaller than `want`, allow what we have.
+      if (seen.size >= pool.length) break;
+      continue;
+    }
+    seen.add(w);
+    out.push(w);
+  }
+  return { name: t.name || ('Theme ' + level), words: out };
 }
 
 function nextSyllable() {
@@ -204,18 +250,9 @@ function inGrid(r, c) { return r >= 0 && r < ROWS && c >= 0 && c < COLS; }
 
 // ---- Syllable-based word matching ------------------------------------------
 // A word is formed when 2+ adjacent syllables (along a single line direction)
-// concatenate — in any order — to a dictionary word. No letters are added or
-// removed: each participating syllable contributes its letters whole.
-
-function permutations(arr) {
-  if (arr.length <= 1) return [arr.slice()];
-  const out = [];
-  for (let i = 0; i < arr.length; i++) {
-    const rest = arr.slice(0, i).concat(arr.slice(i + 1));
-    for (const p of permutations(rest)) out.push([arr[i], ...p]);
-  }
-  return out;
-}
+// concatenate to a dictionary word. The line can be read in either direction
+// (forward or reversed-syllable-order). No letters are added or removed —
+// each participating syllable contributes its letters whole.
 
 // Horizontal chain: walk left and right along the row, collecting syllables
 // that touch end-to-end (no empty cells between them).
@@ -266,8 +303,10 @@ function buildLineChain(s, dr, dc, charIdx) {
   return chain;
 }
 
-// Find the highest-letter-count permutation of any contiguous sub-array of
-// `chain` that contains `mustInclude` and concatenates to a dict word.
+// Find the longest contiguous sub-array of `chain` (containing `mustInclude`)
+// whose forward or reversed syllable-order concatenation is a dictionary word.
+// This is linear in the number of sub-arrays, so it stays fast even when the
+// chain grows long — no factorial permutation explosion.
 function findBestMatchInChain(chain, mustInclude) {
   const idx = chain.indexOf(mustInclude);
   if (idx < 0) return null;
@@ -285,15 +324,17 @@ function findBestMatchInChain(chain, mustInclude) {
   }
   cands.sort((a, b) => b.total - a.total);
   for (const cd of cands) {
-    for (const perm of permutations(cd.sub)) {
-      const concat = perm.map(x => x.syllable).join('').toLowerCase();
-      if (dictionary.has(concat)) {
-        const cells = [];
-        for (const x of cd.sub) {
-          for (let i = 0; i < x.len; i++) cells.push([x.row, x.startCol + i]);
-        }
-        return { syllables: cd.sub.slice(), word: concat, cells };
+    const fwd = cd.sub.map(x => x.syllable).join('').toLowerCase();
+    const rev = cd.sub.slice().reverse().map(x => x.syllable).join('').toLowerCase();
+    let word = null;
+    if (dictionary.has(fwd)) word = fwd;
+    else if (dictionary.has(rev)) word = rev;
+    if (word) {
+      const cells = [];
+      for (const x of cd.sub) {
+        for (let i = 0; i < x.len; i++) cells.push([x.row, x.startCol + i]);
       }
+      return { syllables: cd.sub.slice(), word, cells };
     }
   }
   return null;
@@ -703,7 +744,7 @@ function initState() {
     levelName: '',
     levelWords: [],
     wordsThisLevel: 0,
-    wordsToWin: 60,
+    wordsToWin: levelWinTarget(1),
   };
   installLevel(1, true);
   // Re-seed queue using freshly built level inventory
@@ -716,11 +757,12 @@ function initState() {
 function installLevel(level, silent) {
   state.level = level;
   state.wordsThisLevel = 0;
+  state.wordsToWin = levelWinTarget(level);
   const src = pickLevelSource(level);
   state.levelName = src.name;
   state.levelWords = src.words;
-  // Theme words ARE the dictionary for this level.
-  dictionary = buildDictionaryFromWords(src.words);
+  // Themes only drive the syllable inventory; the global words.txt set is the
+  // validator and stays put across levels.
   syllables = buildSyllablesFromWords(src.words);
   if (!silent) {
     state.bursts.push({
@@ -1231,7 +1273,18 @@ async function main() {
   ctx = canvas.getContext('2d');
   loadScores();
   document.getElementById('highscores').innerHTML = renderScoresHtml();
-  const themesText = await loadFile('themes.json');
+  const [wordsText, dictText, themesText] = await Promise.all([
+    loadFile('words.txt'),
+    loadFile('dict.txt'),
+    loadFile('themes.json'),
+  ]);
+  // words.txt is canonical; dict.txt is accepted as a fallback for convenience.
+  dictionary = buildDictionaryFromText(wordsText || dictText);
+  if (!dictionary.size) {
+    console.error('No words.txt or dict.txt loaded — combos validate against this file.');
+  } else {
+    console.log('word list loaded:', dictionary.size, 'valid words');
+  }
   if (themesText) {
     try {
       const parsed = JSON.parse(themesText);
