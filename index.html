@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Letter Cannon</title>
+<title>10,000 Monkeys</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body {
@@ -51,16 +51,16 @@
 </head>
 <body>
 <div id="wrap">
-  <canvas id="game" width="1000" height="900"></canvas>
+  <canvas id="game" width="1000" height="960"></canvas>
 
   <div id="menu" class="overlay">
-    <h1>LETTER CANNON</h1>
-    <h2>a word-shooter</h2>
-    <p>Shoot letters into the grid above. Three or more in a row, column, or diagonal that spell a word — the word burns, and unsupported letters fall for cascade combos.</p>
-    <p>The grid creeps down. If it reaches the cannon, the game ends.</p>
+    <h1>10,000 MONKEYS</h1>
+    <h2>a syllable shooter</h2>
+    <p>You're shooting <em>syllables</em> — chunks of 2, 3, or 4 letters drawn from the language by frequency. When the letters in a row, column, or diagonal spell a dictionary word (≥ 4 letters), the parent syllable bubbles burn, and unsupported bubbles fall for cascade combos.</p>
+    <p>Each shot adds 1 to the penalty meter. Burning a word relieves the penalty by (letters − 2) — a 4-letter word is worth 2, a 6-letter word 4, an 8-letter word 6. When penalty reaches 10, the grid shifts down; if it reaches the cannon, the game ends.</p>
     <button id="play">PLAY</button>
     <div class="scores" id="highscores"></div>
-    <div class="controls">←→ AIM &nbsp;·&nbsp; SPACE / CLICK to shoot &nbsp;·&nbsp; SHIFT to stash</div>
+    <div class="controls">←→ AIM &nbsp;·&nbsp; SPACE / CLICK to shoot &nbsp;·&nbsp; SHIFT to stash &nbsp;·&nbsp; ENTER to drop a row</div>
   </div>
 
   <div id="gameover" class="overlay hidden">
@@ -71,20 +71,21 @@
   </div>
 </div>
 
-<script id="fallback-text" type="text/plain">
-It is a truth universally acknowledged that a single man in possession of a good fortune must be in want of a wife. However little known the feelings or views of such a man may be on his first entering a neighbourhood this truth is so well fixed in the minds of the surrounding families that he is considered the rightful property of some one or other of their daughters. The business of her life was to get her daughters married its solace was visiting and news. They are all silly and ignorant like other girls but Lizzy has something more of quickness than her sisters. Mr Bennet was so odd a mixture of quick parts sarcastic humour reserve and caprice that the experience of three and twenty years had been insufficient to make his wife understand his character.
-</script>
-
 <script>
 "use strict";
 
 // ---- Geometry / palette ----
-const COLS = 20, ROWS = 14, CELL = 42;
-const GRID_X = 80, GRID_Y = 30;
-const GRID_W = COLS * CELL, GRID_H = ROWS * CELL;
-const CANVAS_W = 1000, CANVAS_H = 900;
+// Char-based grid: each cell holds at most one letter (.ch + .sylId).
+// A syllable bubble is a rounded rectangle spanning 2-4 contiguous chars
+// in a single row. Up to 25 letters across.
+const COLS = 25, ROWS = 14;
+const CHAR_W = 36, CELL_H = 44;
+const GRID_W = COLS * CHAR_W, GRID_H = ROWS * CELL_H;
+const CANVAS_W = 1000, CANVAS_H = 960;
+const GRID_X = (CANVAS_W - GRID_W) / 2;
+const GRID_Y = 30;
 const CANNON_X = CANVAS_W / 2;
-const CANNON_Y = 800;
+const CANNON_Y = 820;
 const PROJ_SPEED = 950;
 
 const PALETTE = [
@@ -116,9 +117,9 @@ function lighten(hex, amt) {
 // ---- Globals ----
 let canvas, ctx;
 let state = null;
-let dictionary = new Set();
-let lettersStream = [];
-let streamIdx = 0;
+let dictionary = new Set();   // current level's valid-word set (rebuilt per level)
+let themes = null;            // thematic word groups loaded from themes.json
+let syllables = null;         // current level's syllable inventory (cumulative weights)
 let highScores = [];
 let useMouseAim = false;
 const keyHeld = { left: false, right: false };
@@ -135,153 +136,347 @@ async function loadFile(url) {
   return null;
 }
 
-async function loadText() {
-  const t = await loadFile('text-rus.txt');
-  if (t) return t;
-  const el = document.getElementById('fallback-text');
-  return el ? el.textContent : 'the quick brown fox jumps over the lazy dog';
-}
-
-async function loadDictText() {
-  const t = await loadFile('dict-rus.txt');
-  if (t) return t;
-  // Fallback: derive a small dictionary from the source text itself
-  return null;
-}
-
-function buildDictionary(dictText, sourceText) {
-  const out = new Set();
-  const raw = (dictText || sourceText).toLowerCase();
-  const words = raw.match(/[а-яёa-z]+/gi) || [];
-  for (const w of words) if (w.length >= 3) out.add(w);
-  return out;
-}
-
-function buildLetterStream(text, length) {
-  const words = text.match(/[А-ЯЁа-яёA-Za-z]+/g) || [];
-  const items = [];
-  words.forEach((w, i) => {
-    for (const c of w.toUpperCase()) items.push({ ch: c, wid: i });
-  });
-  // shuffle
-  for (let i = items.length - 1; i > 0; i--) {
-    const j = (Math.random() * (i + 1)) | 0;
-    const t = items[i]; items[i] = items[j]; items[j] = t;
+// Each level's theme word list IS the dictionary for that level.
+// installLevel() rebuilds both the dictionary set and the syllable inventory
+// from the chosen theme's words.
+function buildDictionaryFromWords(words) {
+  const set = new Set();
+  for (const raw of words) {
+    const w = (raw || '').toLowerCase().replace(/[^a-zа-яё]/gi, '');
+    if (w.length >= 4) set.add(w);
   }
-  // generate stream avoiding repeating wid within K
-  const stream = [];
-  const recent = [];
-  const K = 6;
-  let cur = 0;
-  while (stream.length < length) {
-    let pick = -1;
-    for (let t = 0; t < items.length; t++) {
-      const i = (cur + t) % items.length;
-      if (recent.indexOf(items[i].wid) === -1) { pick = i; break; }
+  return set;
+}
+
+// Build a frequency-weighted 2/3-letter syllable inventory from a word set.
+// Common substrings get higher weight automatically.
+function buildSyllablesFromWords(words) {
+  const counts = new Map();
+  for (const raw of words) {
+    const w = (raw || '').toLowerCase();
+    for (const len of [2, 3]) {
+      if (w.length < len) continue;
+      for (let i = 0; i + len <= w.length; i++) {
+        const syl = w.substr(i, len);
+        if (!/^[a-zа-яё]+$/i.test(syl)) continue;
+        counts.set(syl, (counts.get(syl) || 0) + 1);
+      }
     }
-    if (pick < 0) pick = cur % items.length;
-    stream.push(items[pick].ch);
-    recent.push(items[pick].wid);
-    if (recent.length > K) recent.shift();
-    cur = (pick + 1) % items.length;
   }
-  return stream;
+  const items = [];
+  let total = 0;
+  for (const [syl, cnt] of counts) {
+    total += cnt;
+    items.push({ syl: syl.toUpperCase(), cum: total });
+  }
+  return { items, total };
 }
 
-function nextLetter() {
-  return lettersStream[streamIdx++ % lettersStream.length];
+// Pick the theme for a given level. Themes rotate (level N → theme (N-1) % T).
+// Returns { name, words } — the words are both the dictionary and the syllable
+// source for this level.
+function pickLevelSource(level) {
+  if (!themes || !themes.length) {
+    console.error('No themes loaded — run build_themes.py to fetch themes.json.');
+    return { name: '', words: [] };
+  }
+  const t = themes[(level - 1) % themes.length];
+  const words = (t.words || []).filter(w => typeof w === 'string' && w.length >= 4);
+  return { name: t.name || ('Theme ' + level), words };
+}
+
+function nextSyllable() {
+  const inv = syllables;
+  if (!inv || !inv.items.length) return 'XX';
+  const r = Math.random() * inv.total;
+  let lo = 0, hi = inv.items.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (inv.items[mid].cum <= r) lo = mid + 1;
+    else hi = mid;
+  }
+  return inv.items[lo].syl;
 }
 
 // ---- Grid helpers ----
 const DIRS = [[0, 1], [1, 0], [1, 1], [1, -1]];
 function inGrid(r, c) { return r >= 0 && r < ROWS && c >= 0 && c < COLS; }
 
-function findWordsAt(r, c) {
-  const grid = state.grid;
+// ---- Syllable-based word matching ------------------------------------------
+// A word is formed when 2+ adjacent syllables (along a single line direction)
+// concatenate — in any order — to a dictionary word. No letters are added or
+// removed: each participating syllable contributes its letters whole.
+
+function permutations(arr) {
+  if (arr.length <= 1) return [arr.slice()];
   const out = [];
-  for (const [dr, dc] of DIRS) {
-    let r0 = r, c0 = c;
-    while (inGrid(r0 - dr, c0 - dc) && grid[r0 - dr][c0 - dc]) { r0 -= dr; c0 -= dc; }
-    let r1 = r, c1 = c;
-    while (inGrid(r1 + dr, c1 + dc) && grid[r1 + dr][c1 + dc]) { r1 += dr; c1 += dc; }
-    const cells = [], letters = [];
-    let rr = r0, cc = c0;
-    while (true) {
-      cells.push([rr, cc]);
-      letters.push(grid[rr][cc].letter);
-      if (rr === r1 && cc === c1) break;
-      rr += dr; cc += dc;
-    }
-    const idx = cells.findIndex(([rrr, ccc]) => rrr === r && ccc === c);
-    let best = null;
-    for (let len = letters.length; len >= 3 && !best; len--) {
-      const sLo = Math.max(0, idx - len + 1);
-      const sHi = Math.min(letters.length - len, idx);
-      for (let s = sLo; s <= sHi; s++) {
-        const sub = letters.slice(s, s + len).join('').toLowerCase();
-        if (dictionary.has(sub)) { best = { cells: cells.slice(s, s + len), word: sub }; break; }
-        const rev = sub.split('').reverse().join('');
-        if (dictionary.has(rev)) { best = { cells: cells.slice(s, s + len), word: rev }; break; }
-      }
-    }
-    if (best) out.push(best);
+  for (let i = 0; i < arr.length; i++) {
+    const rest = arr.slice(0, i).concat(arr.slice(i + 1));
+    for (const p of permutations(rest)) out.push([arr[i], ...p]);
   }
   return out;
 }
 
-function findSnapCell(x, y) {
+// Horizontal chain: walk left and right along the row, collecting syllables
+// that touch end-to-end (no empty cells between them).
+function buildHorizChain(s) {
+  const row = s.row;
+  const chain = [s];
+  let c = s.startCol - 1;
+  while (c >= 0 && state.grid[row][c]) {
+    const cell = state.grid[row][c];
+    const ns = state.syllables.get(cell.sylId);
+    if (!ns || chain.indexOf(ns) >= 0) break;
+    chain.unshift(ns);
+    c = ns.startCol - 1;
+  }
+  c = s.startCol + s.len;
+  while (c < COLS && state.grid[row][c]) {
+    const cell = state.grid[row][c];
+    const ns = state.syllables.get(cell.sylId);
+    if (!ns || chain.indexOf(ns) >= 0) break;
+    chain.push(ns);
+    c = ns.startCol + ns.len;
+  }
+  return chain;
+}
+
+// Line chain through one char of s in direction (dr, dc): one cell step at a
+// time; whichever syllable the next cell belongs to joins the chain. Stops at
+// an empty cell or a syllable already in the chain.
+function buildLineChain(s, dr, dc, charIdx) {
+  const c0 = s.startCol + charIdx;
+  const chain = [s];
+  let r = s.row - dr, c = c0 - dc;
+  while (inGrid(r, c) && state.grid[r][c]) {
+    const cell = state.grid[r][c];
+    const ns = state.syllables.get(cell.sylId);
+    if (!ns || chain.indexOf(ns) >= 0) break;
+    chain.unshift(ns);
+    r -= dr; c -= dc;
+  }
+  r = s.row + dr; c = c0 + dc;
+  while (inGrid(r, c) && state.grid[r][c]) {
+    const cell = state.grid[r][c];
+    const ns = state.syllables.get(cell.sylId);
+    if (!ns || chain.indexOf(ns) >= 0) break;
+    chain.push(ns);
+    r += dr; c += dc;
+  }
+  return chain;
+}
+
+// Find the highest-letter-count permutation of any contiguous sub-array of
+// `chain` that contains `mustInclude` and concatenates to a dict word.
+function findBestMatchInChain(chain, mustInclude) {
+  const idx = chain.indexOf(mustInclude);
+  if (idx < 0) return null;
+  const cands = [];
+  for (let len = 2; len <= chain.length; len++) {
+    const sLo = Math.max(0, idx - len + 1);
+    const sHi = Math.min(chain.length - len, idx);
+    for (let s = sLo; s <= sHi; s++) {
+      const sub = chain.slice(s, s + len);
+      let total = 0;
+      for (const x of sub) total += x.len;
+      if (total < 4) continue;
+      cands.push({ sub, total });
+    }
+  }
+  cands.sort((a, b) => b.total - a.total);
+  for (const cd of cands) {
+    for (const perm of permutations(cd.sub)) {
+      const concat = perm.map(x => x.syllable).join('').toLowerCase();
+      if (dictionary.has(concat)) {
+        const cells = [];
+        for (const x of cd.sub) {
+          for (let i = 0; i < x.len; i++) cells.push([x.row, x.startCol + i]);
+        }
+        return { syllables: cd.sub.slice(), word: concat, cells };
+      }
+    }
+  }
+  return null;
+}
+
+// All distinct word matches involving newSyl across the 4 line directions.
+function findSyllableWords(newSyl) {
+  const found = [];
+  const seen = new Set();
+  const tryChain = (chain) => {
+    const m = findBestMatchInChain(chain, newSyl);
+    if (!m) return;
+    const sig = m.syllables.map(x => x.id).slice().sort().join(',');
+    if (seen.has(sig)) return;
+    seen.add(sig);
+    found.push(m);
+  };
+  tryChain(buildHorizChain(newSyl));
+  for (let i = 0; i < newSyl.len; i++) {
+    tryChain(buildLineChain(newSyl, 1, 0, i));   // vertical
+    tryChain(buildLineChain(newSyl, 1, 1, i));   // diagonal \
+    tryChain(buildLineChain(newSyl, 1, -1, i));  // diagonal /
+  }
+  return found;
+}
+
+// Place a syllable temporarily in the grid + state.syllables, run fn, then
+// restore. Used by previews / opportunity scans without mutating real state.
+function withTempSyllable(row, startCol, syllable, fn) {
+  const id = -1 - state.nextSylId; // negative IDs are temp; never collide
+  const entity = { id, syllable, row, startCol, len: syllable.length };
+  state.syllables.set(id, entity);
+  for (let i = 0; i < entity.len; i++) {
+    state.grid[row][startCol + i] = { ch: syllable[i], sylId: id };
+  }
+  try { return fn(entity); }
+  finally {
+    for (let i = 0; i < entity.len; i++) state.grid[row][startCol + i] = null;
+    state.syllables.delete(id);
+  }
+}
+
+// Find every (row, startCol) where the given syllable could dock so that
+// it (a) fits — all len cells empty — and (b) is supported (top row, or any
+// of its cells touches an existing letter on any of 4 sides).
+function listDockSlots(syllable) {
+  const len = syllable.length;
+  const slots = [];
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c <= COLS - len; c++) {
+      let ok = true;
+      for (let i = 0; i < len; i++) {
+        if (state.grid[r][c + i]) { ok = false; break; }
+      }
+      if (!ok) continue;
+      let touching = (r === 0);
+      for (let i = 0; i < len && !touching; i++) {
+        for (const [dr, dc] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+          const nr = r + dr, nc = c + i + dc;
+          if (inGrid(nr, nc) && state.grid[nr][nc]) { touching = true; break; }
+        }
+      }
+      if (!touching) continue;
+      slots.push({ r, c });
+    }
+  }
+  return slots;
+}
+
+function placeSyllableInGrid(s) {
+  state.syllables.set(s.id, s);
+  for (let i = 0; i < s.len; i++) {
+    state.grid[s.row][s.startCol + i] = { ch: s.syllable[i], sylId: s.id };
+  }
+}
+
+function removeSyllableFromGrid(id) {
+  const s = state.syllables.get(id);
+  if (!s) return null;
+  for (let i = 0; i < s.len; i++) state.grid[s.row][s.startCol + i] = null;
+  state.syllables.delete(id);
+  return s;
+}
+
+// Existing syllables that would burn together with the current syllable in
+// some valid dock slot. Highlighted regardless of aim.
+function computeOpportunities() {
+  const set = new Set();
+  if (!state || state.gameOver) return set;
+  const syl = state.queue[0];
+  if (!syl) return set;
+  const len = syl.length;
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c <= COLS - len; c++) {
+      let ok = true;
+      for (let i = 0; i < len; i++) if (state.grid[r][c + i]) { ok = false; break; }
+      if (!ok) continue;
+      let touch = (r === 0);
+      for (let i = 0; i < len && !touch; i++) {
+        for (const [dr, dc] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+          const nr = r + dr, nc = c + i + dc;
+          if (inGrid(nr, nc) && state.grid[nr][nc]) { touch = true; break; }
+        }
+      }
+      if (!touch) continue;
+      const matches = withTempSyllable(r, c, syl, (e) => findSyllableWords(e));
+      if (!matches.length) continue;
+      for (const m of matches) {
+        for (const s of m.syllables) {
+          if (s.id < 0) continue; // skip the tentative syllable
+          for (let i = 0; i < s.len; i++) set.add(s.row * COLS + (s.startCol + i));
+        }
+      }
+    }
+  }
+  return set;
+}
+
+// Snap a moving projectile (x, y) to the nearest valid dock slot for `len`-wide syllable.
+function findDockSlot(x, y, len) {
   let bR = -1, bC = -1, bD = Infinity;
   for (let r = 0; r < ROWS; r++) {
-    for (let c = 0; c < COLS; c++) {
-      if (state.grid[r][c]) continue;
-      const cx = GRID_X + c * CELL + CELL / 2;
-      const cy = GRID_Y + r * CELL + CELL / 2;
-      const dx = x - cx, dy = y - cy;
-      const d = dx * dx + dy * dy;
-      if (d < bD) { bD = d; bR = r; bC = c; }
+    for (let c = 0; c <= COLS - len; c++) {
+      let ok = true;
+      for (let i = 0; i < len; i++) if (state.grid[r][c + i]) { ok = false; break; }
+      if (!ok) continue;
+      let touch = (r === 0);
+      for (let i = 0; i < len && !touch; i++) {
+        for (const [dr, dc] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+          const nr = r + dr, nc = c + i + dc;
+          if (inGrid(nr, nc) && state.grid[nr][nc]) { touch = true; break; }
+        }
+      }
+      if (!touch) continue;
+      const cx = GRID_X + c * CHAR_W + (len * CHAR_W) / 2;
+      const cy = GRID_Y + r * CELL_H + CELL_H / 2;
+      const dd = (x - cx) * (x - cx) + (y - cy) * (y - cy);
+      if (dd < bD) { bD = dd; bR = r; bC = c; }
     }
   }
   return { r: bR, c: bC };
 }
 
 // ---- Trajectory simulation (with wall bounces) ----
-function simulateTrajectory(angle) {
-  const r = CELL * 0.45;
-  let x = CANNON_X, y = CANNON_Y - 28;
+function simulateTrajectory(angle, halfW) {
+  let x = CANNON_X, y = CANNON_Y - 30;
   let vx = Math.cos(angle), vy = Math.sin(angle);
   const segs = [];
   let segStart = { x, y };
   const stepLen = 2;
+  const halfH = CELL_H * 0.4;
   for (let step = 0; step < 4000; step++) {
     x += vx * stepLen;
     y += vy * stepLen;
-    if (x < GRID_X + r) {
-      x = GRID_X + r;
+    if (x < GRID_X + halfW) {
+      x = GRID_X + halfW;
       segs.push([segStart, { x, y }]);
       vx = -vx; segStart = { x, y };
-    } else if (x > GRID_X + GRID_W - r) {
-      x = GRID_X + GRID_W - r;
+    } else if (x > GRID_X + GRID_W - halfW) {
+      x = GRID_X + GRID_W - halfW;
       segs.push([segStart, { x, y }]);
       vx = -vx; segStart = { x, y };
     }
-    if (y < GRID_Y + r) {
+    if (y < GRID_Y + halfH) {
       segs.push([segStart, { x, y }]);
       return { segs, endX: x, endY: y };
     }
-    // collision with bubbles (only near grid)
-    if (y < GRID_Y + GRID_H + CELL) {
+    if (y < GRID_Y + GRID_H + CELL_H) {
+      const boxLeft = x - halfW, boxRight = x + halfW;
+      const boxTop = y - halfH, boxBot = y + halfH;
+      const cMin = Math.max(0, Math.floor((boxLeft - GRID_X) / CHAR_W));
+      const cMax = Math.min(COLS - 1, Math.floor((boxRight - GRID_X) / CHAR_W));
+      const rMin = Math.max(0, Math.floor((boxTop - GRID_Y) / CELL_H));
+      const rMax = Math.min(ROWS - 1, Math.floor((boxBot - GRID_Y) / CELL_H));
       let hit = false;
-      for (let rr = 0; rr < ROWS && !hit; rr++) {
-        for (let cc = 0; cc < COLS && !hit; cc++) {
-          if (!state.grid[rr][cc]) continue;
-          const cx = GRID_X + cc * CELL + CELL / 2;
-          const cy = GRID_Y + rr * CELL + CELL / 2;
-          const dx = x - cx, dy = y - cy;
-          if (dx * dx + dy * dy < (CELL * 0.85) * (CELL * 0.85)) {
-            segs.push([segStart, { x, y }]);
-            return { segs, endX: x, endY: y };
-          }
+      for (let r = rMin; r <= rMax && !hit; r++) {
+        for (let c = cMin; c <= cMax && !hit; c++) {
+          if (state.grid[r][c]) hit = true;
         }
+      }
+      if (hit) {
+        segs.push([segStart, { x, y }]);
+        return { segs, endX: x, endY: y };
       }
     }
     if (y > CANNON_Y) break;
@@ -290,157 +485,255 @@ function simulateTrajectory(angle) {
   return { segs, endX: x, endY: y };
 }
 
-// ---- Preview (for green highlight + score) ----
+// ---- Preview (green highlight + score) ----
 function previewLanding(angle) {
-  const traj = simulateTrajectory(angle);
-  const snap = findSnapCell(traj.endX, traj.endY);
-  let words = [], previewScore = 0;
+  const syl = state.queue[0];
+  if (!syl) return { traj: { segs: [] }, snap: { r: -1, c: -1 }, matches: [], previewScore: 0, syl: '' };
+  const halfW = (syl.length * CHAR_W) / 2;
+  const traj = simulateTrajectory(angle, halfW);
+  const snap = findDockSlot(traj.endX, traj.endY, syl.length);
+  let matches = [], previewScore = 0;
   if (snap.r >= 0) {
-    state.grid[snap.r][snap.c] = { letter: state.queue[0] };
-    words = findWordsAt(snap.r, snap.c);
-    state.grid[snap.r][snap.c] = null;
-    if (words.length) {
-      const all = new Set();
-      for (const w of words) for (const [r, c] of w.cells) all.add(r * 100 + c);
-      previewScore = all.size * all.size * 10;
+    matches = withTempSyllable(snap.r, snap.c, syl, (e) => findSyllableWords(e));
+    if (matches.length) {
+      const seen = new Set();
+      let totalChars = 0;
+      for (const m of matches) {
+        for (const s of m.syllables) {
+          if (seen.has(s.id)) continue;
+          seen.add(s.id);
+          totalChars += s.len;
+        }
+      }
+      previewScore = scoreFor(totalChars, 1);
     }
   }
-  return { traj, snap, words, previewScore };
+  return { traj, snap, matches, previewScore, syl };
 }
 
 // ---- Place + cascade ----
-function placeShot(r, c, letter) {
-  state.grid[r][c] = { letter };
+function placeShot(row, startCol, syllable) {
+  const id = state.nextSylId++;
+  const entity = { id, syllable, row, startCol, len: syllable.length };
+  placeSyllableInGrid(entity);
   state.busy = true;
-  resolveBurn(r, c);
+  resolveBurn(entity);
 }
 
-function resolveBurn(r, c) {
-  const words = findWordsAt(r, c);
-  if (!words.length) {
+function resolveBurn(newSyl) {
+  const matches = findSyllableWords(newSyl);
+  if (!matches.length) {
     state.busy = false;
     state.combo = 0;
+    maybeDescend();
     return;
   }
-  const cellSet = new Set();
-  for (const w of words) for (const [rr, cc] of w.cells) cellSet.add(rr * 100 + cc);
-  const burnList = [...cellSet].map(k => [Math.floor(k / 100), k % 100]);
+  const burnSyls = new Set();
+  for (const m of matches) for (const s of m.syllables) burnSyls.add(s.id);
+  let totalChars = 0;
+  for (const id of burnSyls) {
+    const s = state.syllables.get(id);
+    if (s) totalChars += s.len;
+  }
   state.combo += 1;
-  const len = burnList.length;
-  const gain = Math.round(len * len * 10 * (1 + (state.combo - 1) * 0.5));
+  const gain = scoreFor(totalChars, state.combo);
   state.score += gain;
+  state.penalty -= wordRelief(totalChars);
 
-  // bursts + remove
-  for (const [rr, cc] of burnList) {
+  for (const id of burnSyls) {
+    const s = state.syllables.get(id);
+    if (!s) continue;
     state.bursts.push({
-      x: GRID_X + cc * CELL + CELL / 2,
-      y: GRID_Y + rr * CELL + CELL / 2,
-      letter: state.grid[rr][cc].letter,
-      t: 0, dur: 0.45
+      x: GRID_X + s.startCol * CHAR_W + (s.len * CHAR_W) / 2,
+      y: GRID_Y + s.row * CELL_H + CELL_H / 2,
+      w: s.len * CHAR_W,
+      syllable: s.syllable,
+      t: 0, dur: 0.5,
     });
-    state.grid[rr][cc] = null;
+    removeSyllableFromGrid(id);
   }
 
   state.bursts.push({
-    x: GRID_X + c * CELL + CELL / 2,
-    y: GRID_Y + r * CELL,
-    text: words.map(w => w.word.toUpperCase()).join(' · ') + '   +' + gain,
-    t: 0, dur: 1.4, isText: true
+    x: GRID_X + newSyl.startCol * CHAR_W + (newSyl.len * CHAR_W) / 2,
+    y: GRID_Y + newSyl.row * CELL_H,
+    text: matches.map(m => m.word.toUpperCase()).join(' · ') + '   +' + gain,
+    t: 0, dur: 1.4, isText: true,
   });
+  for (const m of matches) state.wordsLog.push(m.word.toUpperCase());
 
-  // drop disconnected after a beat
+  // Level progression: each word match counts toward the level goal.
+  state.wordsThisLevel += matches.length;
+  if (state.wordsThisLevel >= state.wordsToWin) levelUp();
+
   setTimeout(() => {
-    if (state.gameOver) return;
+    if (!state || state.gameOver) return;
     const dropped = dropDisconnected();
     if (dropped > 0) {
-      const dGain = Math.round(dropped * 30 * (1 + (state.combo - 1) * 0.4));
+      const dGain = Math.round(dropped * 25 * (1 + (state.combo - 1) * 0.4));
       state.score += dGain;
       state.bursts.push({
         x: CANVAS_W / 2, y: GRID_Y + GRID_H + 30,
         text: '+' + dGain + ' · ' + dropped + ' loose',
-        t: 0, dur: 1.2, isText: true
+        t: 0, dur: 1.2, isText: true,
       });
     }
     state.busy = false;
     state.combo = 0;
+    maybeDescend();
   }, 380);
 }
 
+// Penalty relief, linear in letter count.
+//   relief(4)=2, relief(6)=4, relief(8)=6, relief(12)=10, …
+function wordRelief(L) {
+  return Math.max(0, L - 2);
+}
+
+// Score per burn — quadratic in total letters destroyed.
+function scoreFor(letters, combo) {
+  return Math.round(letters * letters * 5 * (1 + (Math.max(1, combo) - 1) * 0.4));
+}
+
+function manualDescend() {
+  if (!state || state.gameOver || state.projectile || state.busy) return;
+  state.penalty = 0;
+  descendGrid();
+}
+
+function maybeDescend() {
+  while (!state.gameOver && state.penalty >= 10) {
+    state.penalty -= 10;
+    descendGrid();
+  }
+}
+
+// drop syllables not connected (4-way letter adjacency) to row 0
 function dropDisconnected() {
-  const conn = [];
-  for (let r = 0; r < ROWS; r++) conn.push(new Array(COLS).fill(false));
+  const reach = new Set();
   const stack = [];
-  for (let c = 0; c < COLS; c++) {
-    if (state.grid[0][c]) { stack.push([0, c]); conn[0][c] = true; }
+  for (const s of state.syllables.values()) {
+    if (s.row === 0) { reach.add(s.id); stack.push(s); }
   }
   while (stack.length) {
-    const [r, c] = stack.pop();
-    for (const [dr, dc] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-      const nr = r + dr, nc = c + dc;
-      if (!inGrid(nr, nc) || !state.grid[nr][nc] || conn[nr][nc]) continue;
-      conn[nr][nc] = true;
-      stack.push([nr, nc]);
+    const s = stack.pop();
+    for (let i = 0; i < s.len; i++) {
+      const r = s.row, c = s.startCol + i;
+      for (const [dr, dc] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+        const nr = r + dr, nc = c + dc;
+        if (!inGrid(nr, nc)) continue;
+        const cell = state.grid[nr][nc];
+        if (!cell || reach.has(cell.sylId)) continue;
+        const ns = state.syllables.get(cell.sylId);
+        if (!ns) continue;
+        reach.add(ns.id);
+        stack.push(ns);
+      }
     }
   }
   let count = 0;
-  for (let r = 0; r < ROWS; r++) {
-    for (let c = 0; c < COLS; c++) {
-      if (state.grid[r][c] && !conn[r][c]) {
-        state.bursts.push({
-          x: GRID_X + c * CELL + CELL / 2,
-          y: GRID_Y + r * CELL + CELL / 2,
-          letter: state.grid[r][c].letter,
-          falling: true,
-          vx: (Math.random() - 0.5) * 80,
-          vy: -40 - Math.random() * 60,
-          t: 0, dur: 1.6
-        });
-        state.grid[r][c] = null;
-        count++;
-      }
-    }
+  const ids = [...state.syllables.keys()];
+  for (const id of ids) {
+    if (reach.has(id)) continue;
+    const s = state.syllables.get(id);
+    state.bursts.push({
+      x: GRID_X + s.startCol * CHAR_W + (s.len * CHAR_W) / 2,
+      y: GRID_Y + s.row * CELL_H + CELL_H / 2,
+      w: s.len * CHAR_W,
+      syllable: s.syllable,
+      falling: true,
+      vx: (Math.random() - 0.5) * 80,
+      vy: -40 - Math.random() * 60,
+      t: 0, dur: 1.6,
+    });
+    removeSyllableFromGrid(id);
+    count++;
   }
   return count;
 }
 
 // ---- Descend ----
 function descendGrid() {
-  for (let c = 0; c < COLS; c++) {
-    if (state.grid[ROWS - 1][c]) { endGame(); return; }
+  for (const s of state.syllables.values()) {
+    if (s.row === ROWS - 1) { endGame(); return; }
   }
-  for (let r = ROWS - 1; r > 0; r--) {
-    for (let c = 0; c < COLS; c++) state.grid[r][c] = state.grid[r - 1][c];
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) state.grid[r][c] = null;
+  for (const s of state.syllables.values()) s.row += 1;
+  for (const s of state.syllables.values()) {
+    for (let i = 0; i < s.len; i++) state.grid[s.row][s.startCol + i] = { ch: s.syllable[i], sylId: s.id };
   }
-  for (let c = 0; c < COLS; c++) state.grid[0][c] = { letter: nextLetter() };
+  generateRow(0);
+}
+
+function generateRow(row) {
+  let col = 0;
+  while (col < COLS) {
+    if (col > 0 && Math.random() < 0.10) { col++; continue; }
+    const syl = nextSyllable();
+    if (col + syl.length > COLS) { col++; continue; }
+    const id = state.nextSylId++;
+    placeSyllableInGrid({ id, syllable: syl, row, startCol: col, len: syl.length });
+    col += syl.length;
+  }
 }
 
 // ---- State init ----
 function initState() {
   const grid = [];
   for (let r = 0; r < ROWS; r++) {
-    const row = [];
-    for (let c = 0; c < COLS; c++) row.push(null);
+    const row = new Array(COLS).fill(null);
     grid.push(row);
-  }
-  streamIdx = 0;
-  for (let r = 0; r < 3; r++) {
-    for (let c = 0; c < COLS; c++) grid[r][c] = { letter: nextLetter() };
   }
   state = {
     grid,
-    queue: [nextLetter(), nextLetter(), nextLetter()],
+    syllables: new Map(),
+    nextSylId: 1,
+    queue: ['XX', 'XX', 'XX'],
     stash: null,
     projectile: null,
     score: 0,
     combo: 0,
     aimAngle: -Math.PI / 2,
-    descendT: 0,
-    descendInterval: 14000,
+    penalty: 0,
     lastT: 0,
     gameOver: false,
     busy: false,
     bursts: [],
+    wordsLog: [],
+    level: 1,
+    levelName: '',
+    levelWords: [],
+    wordsThisLevel: 0,
+    wordsToWin: 60,
   };
+  installLevel(1, true);
+  // Re-seed queue using freshly built level inventory
+  state.queue = [nextSyllable(), nextSyllable(), nextSyllable()];
+  for (let r = 0; r < 3; r++) generateRow(r);
+}
+
+// Pick the source-word set for a level, rebuild the syllable inventory, and
+// announce. `silent` skips the burst banner (used for the very first init).
+function installLevel(level, silent) {
+  state.level = level;
+  state.wordsThisLevel = 0;
+  const src = pickLevelSource(level);
+  state.levelName = src.name;
+  state.levelWords = src.words;
+  // Theme words ARE the dictionary for this level.
+  dictionary = buildDictionaryFromWords(src.words);
+  syllables = buildSyllablesFromWords(src.words);
+  if (!silent) {
+    state.bursts.push({
+      x: CANVAS_W / 2,
+      y: GRID_Y + GRID_H / 2,
+      text: 'LEVEL ' + level + (src.name ? '   ·   ' + src.name.toUpperCase() : ''),
+      t: 0, dur: 2.4, isText: true, big: true,
+    });
+  }
+}
+
+function levelUp() {
+  installLevel(state.level + 1, false);
 }
 
 // ---- Shoot / stash ----
@@ -448,14 +741,15 @@ function fireShot() {
   if (!state || state.projectile || state.busy || state.gameOver) return;
   state.projectile = {
     x: CANNON_X,
-    y: CANNON_Y - 28,
+    y: CANNON_Y - 30,
     vx: Math.cos(state.aimAngle) * PROJ_SPEED,
     vy: Math.sin(state.aimAngle) * PROJ_SPEED,
-    letter: state.queue[0],
+    syllable: state.queue[0],
   };
   state.queue[0] = state.queue[1];
   state.queue[1] = state.queue[2];
-  state.queue[2] = nextLetter();
+  state.queue[2] = nextSyllable();
+  state.penalty += 1;
 }
 
 function swapStash() {
@@ -464,7 +758,7 @@ function swapStash() {
     state.stash = state.queue[0];
     state.queue[0] = state.queue[1];
     state.queue[1] = state.queue[2];
-    state.queue[2] = nextLetter();
+    state.queue[2] = nextSyllable();
   } else {
     const t = state.queue[0];
     state.queue[0] = state.stash;
@@ -490,39 +784,34 @@ function update(dt) {
       const p = state.projectile;
       p.x += p.vx * sdt;
       p.y += p.vy * sdt;
-      const r = CELL * 0.45;
-      if (p.x < GRID_X + r) { p.x = GRID_X + r; p.vx = -p.vx; }
-      if (p.x > GRID_X + GRID_W - r) { p.x = GRID_X + GRID_W - r; p.vx = -p.vx; }
+      const halfW = (p.syllable.length * CHAR_W) / 2;
+      const halfH = CELL_H * 0.4;
+      if (p.x < GRID_X + halfW) { p.x = GRID_X + halfW; p.vx = -p.vx; }
+      if (p.x > GRID_X + GRID_W - halfW) { p.x = GRID_X + GRID_W - halfW; p.vx = -p.vx; }
       let stop = false;
-      if (p.y < GRID_Y + r) stop = true;
-      if (!stop && p.y < GRID_Y + GRID_H + CELL) {
-        for (let rr = 0; rr < ROWS && !stop; rr++) {
-          for (let cc = 0; cc < COLS && !stop; cc++) {
-            if (!state.grid[rr][cc]) continue;
-            const cx = GRID_X + cc * CELL + CELL / 2;
-            const cy = GRID_Y + rr * CELL + CELL / 2;
-            const dx = p.x - cx, dy = p.y - cy;
-            if (dx * dx + dy * dy < (CELL * 0.85) * (CELL * 0.85)) stop = true;
+      if (p.y < GRID_Y + halfH) stop = true;
+      if (!stop && p.y < GRID_Y + GRID_H + CELL_H) {
+        const boxLeft = p.x - halfW, boxRight = p.x + halfW;
+        const boxTop = p.y - halfH, boxBot = p.y + halfH;
+        const cMin = Math.max(0, Math.floor((boxLeft - GRID_X) / CHAR_W));
+        const cMax = Math.min(COLS - 1, Math.floor((boxRight - GRID_X) / CHAR_W));
+        const rMin = Math.max(0, Math.floor((boxTop - GRID_Y) / CELL_H));
+        const rMax = Math.min(ROWS - 1, Math.floor((boxBot - GRID_Y) / CELL_H));
+        for (let r = rMin; r <= rMax && !stop; r++) {
+          for (let c = cMin; c <= cMax && !stop; c++) {
+            if (state.grid[r][c]) stop = true;
           }
         }
       }
       if (stop) {
-        const snap = findSnapCell(p.x, p.y);
-        const letter = p.letter;
+        const slot = findDockSlot(p.x, p.y, p.syllable.length);
+        const syllable = p.syllable;
         state.projectile = null;
-        if (snap.r >= 0) placeShot(snap.r, snap.c, letter);
+        if (slot.r >= 0) placeShot(slot.r, slot.c, syllable);
+        else { state.busy = false; maybeDescend(); }
         return;
       }
       if (p.y > CANNON_Y + 200) { state.projectile = null; return; }
-    }
-  }
-
-  if (!state.busy && !state.projectile) {
-    state.descendT += dt * 1000;
-    if (state.descendT >= state.descendInterval) {
-      state.descendT = 0;
-      descendGrid();
-      state.descendInterval = Math.max(7000, state.descendInterval - 250);
     }
   }
 
@@ -541,22 +830,14 @@ function update(dt) {
 function render() {
   ctx.fillStyle = '#1f232f';
   ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
-
-  // grid backdrop
   ctx.fillStyle = '#262b3a';
   ctx.fillRect(GRID_X, GRID_Y, GRID_W, GRID_H);
   ctx.strokeStyle = '#2c3142';
   ctx.lineWidth = 1;
   for (let r = 1; r < ROWS; r++) {
     ctx.beginPath();
-    ctx.moveTo(GRID_X, GRID_Y + r * CELL);
-    ctx.lineTo(GRID_X + GRID_W, GRID_Y + r * CELL);
-    ctx.stroke();
-  }
-  for (let c = 1; c < COLS; c++) {
-    ctx.beginPath();
-    ctx.moveTo(GRID_X + c * CELL, GRID_Y);
-    ctx.lineTo(GRID_X + c * CELL, GRID_Y + GRID_H);
+    ctx.moveTo(GRID_X, GRID_Y + r * CELL_H);
+    ctx.lineTo(GRID_X + GRID_W, GRID_Y + r * CELL_H);
     ctx.stroke();
   }
 
@@ -566,60 +847,67 @@ function render() {
     preview = previewLanding(state.aimAngle);
     drawTrajectory(preview.traj);
     if (preview.snap.r >= 0) {
-      // green pre-light if word(s) would form
-      if (preview.words.length > 0) {
-        const seen = new Set();
-        ctx.fillStyle = 'rgba(123, 156, 110, 0.32)';
-        for (const w of preview.words) {
-          for (const [rr, cc] of w.cells) {
-            const k = rr * 100 + cc;
-            if (seen.has(k)) continue;
-            seen.add(k);
-            ctx.fillRect(GRID_X + cc * CELL, GRID_Y + rr * CELL, CELL, CELL);
+      const syl = preview.syl;
+      const len = syl.length;
+      if (preview.matches.length > 0) {
+        const sylsToBurn = new Set();
+        for (const m of preview.matches) {
+          for (const s of m.syllables) {
+            if (s.id < 0) continue; // skip the tentative syllable
+            sylsToBurn.add(s.id);
           }
         }
-        ctx.strokeStyle = '#7b9c6e';
-        ctx.lineWidth = 2;
-        for (const w of preview.words) {
-          if (w.cells.length < 1) continue;
-          const [r0, c0] = w.cells[0], [r1, c1] = w.cells[w.cells.length - 1];
-          ctx.beginPath();
-          ctx.moveTo(GRID_X + c0 * CELL + CELL / 2, GRID_Y + r0 * CELL + CELL / 2);
-          ctx.lineTo(GRID_X + c1 * CELL + CELL / 2, GRID_Y + r1 * CELL + CELL / 2);
-          ctx.stroke();
+        ctx.fillStyle = 'rgba(123, 156, 110, 0.32)';
+        for (const id of sylsToBurn) {
+          const s = state.syllables.get(id);
+          if (!s) continue;
+          drawRoundedRect(GRID_X + s.startCol * CHAR_W + 2, GRID_Y + s.row * CELL_H + 2, s.len * CHAR_W - 4, CELL_H - 4, 9);
+          ctx.fill();
         }
+        drawRoundedRect(GRID_X + preview.snap.c * CHAR_W + 2, GRID_Y + preview.snap.r * CELL_H + 2, len * CHAR_W - 4, CELL_H - 4, 9);
+        ctx.fill();
       }
-      // target ring
-      const cx = GRID_X + preview.snap.c * CELL + CELL / 2;
-      const cy = GRID_Y + preview.snap.r * CELL + CELL / 2;
-      ctx.strokeStyle = preview.words.length ? '#9bbf86' : '#d4b483';
+      ctx.globalAlpha = 0.55;
+      drawSyllableBox(GRID_X + preview.snap.c * CHAR_W, GRID_Y + preview.snap.r * CELL_H, len * CHAR_W, CELL_H, syl);
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = preview.matches.length ? '#9bbf86' : '#d4b483';
       ctx.lineWidth = 2;
       ctx.setLineDash([4, 3]);
-      ctx.beginPath();
-      ctx.arc(cx, cy, CELL * 0.43, 0, Math.PI * 2);
+      drawRoundedRect(GRID_X + preview.snap.c * CHAR_W + 2, GRID_Y + preview.snap.r * CELL_H + 2, len * CHAR_W - 4, CELL_H - 4, 9);
       ctx.stroke();
       ctx.setLineDash([]);
-      // ghost letter
-      ctx.globalAlpha = 0.45;
-      drawBubble(cx, cy, state.queue[0], 0.85);
-      ctx.globalAlpha = 1;
-      // preview score
       if (preview.previewScore > 0) {
         ctx.fillStyle = '#9bbf86';
         ctx.font = 'bold 18px Georgia';
         ctx.textAlign = 'center';
-        ctx.fillText('+' + preview.previewScore, cx, cy - CELL * 0.55);
+        ctx.fillText('+' + preview.previewScore, GRID_X + preview.snap.c * CHAR_W + (len * CHAR_W) / 2, GRID_Y + preview.snap.r * CELL_H - 6);
       }
     }
   }
 
-  // bubbles
-  for (let r = 0; r < ROWS; r++) {
-    for (let c = 0; c < COLS; c++) {
+  // opportunity halos
+  const opportunities = computeOpportunities();
+  if (opportunities.size) {
+    const pulse = 0.5 + 0.3 * Math.sin(performance.now() / 220);
+    const syls = new Set();
+    for (const k of opportunities) {
+      const r = Math.floor(k / COLS), c = k % COLS;
       const cell = state.grid[r][c];
-      if (!cell) continue;
-      drawBubble(GRID_X + c * CELL + CELL / 2, GRID_Y + r * CELL + CELL / 2, cell.letter);
+      if (cell) syls.add(cell.sylId);
     }
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = 'rgba(212, 180, 131,' + pulse.toFixed(3) + ')';
+    for (const id of syls) {
+      const s = state.syllables.get(id);
+      if (!s) continue;
+      drawRoundedRect(GRID_X + s.startCol * CHAR_W + 3, GRID_Y + s.row * CELL_H + 3, s.len * CHAR_W - 6, CELL_H - 6, 9);
+      ctx.stroke();
+    }
+  }
+
+  // syllable bubbles
+  for (const s of state.syllables.values()) {
+    drawSyllableBox(GRID_X + s.startCol * CHAR_W, GRID_Y + s.row * CELL_H, s.len * CHAR_W, CELL_H, s.syllable);
   }
 
   // game-over line
@@ -632,48 +920,57 @@ function render() {
   ctx.stroke();
   ctx.setLineDash([]);
 
-  // cannon
   drawCannon();
 
-  // projectile
   if (state.projectile) {
-    drawBubble(state.projectile.x, state.projectile.y, state.projectile.letter);
+    const len = state.projectile.syllable.length;
+    drawSyllableBox(state.projectile.x - (len * CHAR_W) / 2, state.projectile.y - CELL_H / 2, len * CHAR_W, CELL_H, state.projectile.syllable);
   }
 
-  // queue / stash
   drawQueue();
-
-  // hud
+  drawWordsLine();
   drawHUD();
-
-  // bursts
   drawBursts();
 }
 
-function drawBubble(x, y, letter, scale) {
-  if (!letter) return;
-  scale = scale || 1;
-  const r = CELL * 0.42 * scale;
-  const color = letterColor(letter);
+function drawRoundedRect(x, y, w, h, radius) {
+  const r = Math.min(radius, w / 2, h / 2);
   ctx.beginPath();
-  ctx.arc(x + 1, y + 2, r, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+function drawSyllableBox(x, y, w, h, syllable) {
+  const pad = 2;
+  const bx = x + pad, by = y + pad, bw = w - pad * 2, bh = h - pad * 2;
+  const radius = 9;
+  const color = letterColor(syllable);
+  drawRoundedRect(bx + 1, by + 2, bw, bh, radius);
+  ctx.fillStyle = 'rgba(0,0,0,0.32)';
   ctx.fill();
-  const grad = ctx.createRadialGradient(x - r * 0.35, y - r * 0.4, r * 0.1, x, y, r);
+  const grad = ctx.createLinearGradient(bx, by, bx, by + bh);
   grad.addColorStop(0, lighten(color, 0.45));
   grad.addColorStop(1, color);
-  ctx.beginPath();
-  ctx.arc(x, y, r, 0, Math.PI * 2);
+  drawRoundedRect(bx, by, bw, bh, radius);
   ctx.fillStyle = grad;
   ctx.fill();
-  ctx.strokeStyle = 'rgba(0,0,0,0.25)';
-  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = 'rgba(0,0,0,0.28)';
+  ctx.lineWidth = 1.2;
   ctx.stroke();
   ctx.fillStyle = '#1c1f2a';
-  ctx.font = 'bold ' + Math.round(r * 1.15) + 'px Georgia';
+  const fontPx = Math.round(bh * 0.62);
+  ctx.font = 'bold ' + fontPx + 'px Georgia';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(letter, x, y + 1);
+  ctx.fillText(syllable, bx + bw / 2, by + bh / 2 + 1);
 }
 
 function drawTrajectory(traj) {
@@ -690,11 +987,8 @@ function drawTrajectory(traj) {
 }
 
 function drawCannon() {
-  // platform behind cannon
   ctx.fillStyle = '#262b3a';
   ctx.fillRect(0, CANNON_Y - 8, CANVAS_W, CANVAS_H);
-
-  // base
   const baseR = 38;
   ctx.fillStyle = '#3a3f4f';
   ctx.beginPath();
@@ -703,8 +997,6 @@ function drawCannon() {
   ctx.strokeStyle = '#5a6173';
   ctx.lineWidth = 2;
   ctx.stroke();
-
-  // barrel — local +x direction = aim direction
   ctx.save();
   ctx.translate(CANNON_X, CANNON_Y);
   ctx.rotate(state.aimAngle);
@@ -713,10 +1005,11 @@ function drawCannon() {
   ctx.fillStyle = '#3a3f4f';
   ctx.fillRect(46, -10, 6, 20);
   ctx.restore();
-
-  // letter sitting in cannon
   if (!state.projectile && state.queue[0]) {
-    drawBubble(CANNON_X, CANNON_Y - 4, state.queue[0], 0.82);
+    const syl = state.queue[0];
+    const sc = 0.85;
+    const w = syl.length * CHAR_W * sc, h = CELL_H * sc;
+    drawSyllableBox(CANNON_X - w / 2, CANNON_Y - h / 2, w, h, syl);
   }
 }
 
@@ -724,30 +1017,76 @@ function drawQueue() {
   ctx.fillStyle = '#b3a98e';
   ctx.font = 'bold 13px Georgia';
   ctx.textAlign = 'left';
-  ctx.fillText('NEXT', 30, CANNON_Y - 70);
-  ctx.textAlign = 'center';
-  if (state.queue[1]) drawBubble(50, CANNON_Y - 30, state.queue[1], 0.7);
-  if (state.queue[2]) drawBubble(50, CANNON_Y + 20, state.queue[2], 0.55);
-
-  ctx.fillStyle = '#b3a98e';
-  ctx.font = 'bold 13px Georgia';
+  ctx.fillText('NEXT', 24, CANNON_Y - 70);
+  if (state.queue[1]) {
+    const syl = state.queue[1];
+    const sc = 0.7;
+    const w = syl.length * CHAR_W * sc, h = CELL_H * sc;
+    drawSyllableBox(70 - w / 2, CANNON_Y - 30 - h / 2, w, h, syl);
+  }
+  if (state.queue[2]) {
+    const syl = state.queue[2];
+    const sc = 0.55;
+    const w = syl.length * CHAR_W * sc, h = CELL_H * sc;
+    drawSyllableBox(70 - w / 2, CANNON_Y + 18 - h / 2, w, h, syl);
+  }
   ctx.textAlign = 'right';
-  ctx.fillText('STASH', CANVAS_W - 30, CANNON_Y - 70);
+  ctx.fillText('STASH', CANVAS_W - 24, CANNON_Y - 70);
   if (state.stash) {
-    drawBubble(CANVAS_W - 50, CANNON_Y - 30, state.stash, 0.82);
+    const syl = state.stash;
+    const sc = 0.82;
+    const w = syl.length * CHAR_W * sc, h = CELL_H * sc;
+    drawSyllableBox(CANVAS_W - 70 - w / 2, CANNON_Y - 30 - h / 2, w, h, syl);
   } else {
+    const sc = 0.82;
+    const w = 4 * CHAR_W * sc, h = CELL_H * sc;
     ctx.strokeStyle = '#3a3f4f';
     ctx.lineWidth = 2;
     ctx.setLineDash([4, 4]);
-    ctx.beginPath();
-    ctx.arc(CANVAS_W - 50, CANNON_Y - 30, CELL * 0.42 * 0.82, 0, Math.PI * 2);
+    drawRoundedRect(CANVAS_W - 70 - w / 2, CANNON_Y - 30 - h / 2, w, h, 9);
     ctx.stroke();
     ctx.setLineDash([]);
     ctx.fillStyle = '#5a6173';
     ctx.font = '11px Georgia';
     ctx.textAlign = 'center';
-    ctx.fillText('SHIFT', CANVAS_W - 50, CANNON_Y - 27);
+    ctx.fillText('SHIFT', CANVAS_W - 70, CANNON_Y - 27);
   }
+}
+
+// Running line of every word the player has burned. We treat the log as one
+// long stream of text and render only the suffix that fits — words pile on
+// from the right and older ones scroll off the left as new ones arrive.
+function drawWordsLine() {
+  if (!state.wordsLog || !state.wordsLog.length) return;
+  const y = CANNON_Y + 50;
+  const padX = 30;
+  const maxW = CANVAS_W - padX * 2;
+  ctx.font = 'bold 22px Georgia';
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'left';
+  const sep = '  ·  ';
+  let acc = '';
+  let usedW = 0;
+  for (let i = state.wordsLog.length - 1; i >= 0; i--) {
+    const w = state.wordsLog[i];
+    // Walking right-to-left: the new word goes on the LEFT, so its separator
+    // sits AFTER it (between this word and the more-recent ones already in acc).
+    const piece = w + (acc ? sep : '');
+    const pieceW = ctx.measureText(piece).width;
+    if (usedW + pieceW > maxW) break;
+    acc = piece + acc;
+    usedW += pieceW;
+  }
+  if (!acc) {
+    // Last word alone is wider than the line — show its right-truncated tail.
+    let tail = state.wordsLog[state.wordsLog.length - 1];
+    while (tail.length && ctx.measureText(tail).width > maxW) tail = tail.slice(1);
+    acc = tail;
+  }
+  // Right-align so the newest word sits flush right.
+  const accW = ctx.measureText(acc).width;
+  ctx.fillStyle = '#7b9c6e';
+  ctx.fillText(acc, CANVAS_W - padX - accW, y);
 }
 
 function drawHUD() {
@@ -755,43 +1094,64 @@ function drawHUD() {
   ctx.font = 'bold 26px Georgia';
   ctx.textAlign = 'left';
   ctx.fillText('Score  ' + state.score, 30, CANVAS_H - 18);
+  // Level + progress (top-left of HUD strip)
+  ctx.fillStyle = '#b3a98e';
+  ctx.font = 'bold 16px Georgia';
+  ctx.textAlign = 'left';
+  const labelL = 'LEVEL ' + state.level + (state.levelName ? '  ·  ' + state.levelName.toUpperCase() : '');
+  ctx.fillText(labelL, 30, CANVAS_H - 50);
+  ctx.fillStyle = '#7b9c6e';
+  ctx.font = 'bold 16px Georgia';
+  ctx.textAlign = 'right';
+  ctx.fillText(state.wordsThisLevel + ' / ' + state.wordsToWin + ' words', CANVAS_W - 30, CANVAS_H - 50);
   if (state.combo > 1) {
     ctx.fillStyle = '#c47b6b';
     ctx.font = 'bold 22px Georgia';
     ctx.textAlign = 'right';
     ctx.fillText('Combo ×' + state.combo, CANVAS_W - 30, CANVAS_H - 18);
   }
-  // descend tick bar
-  const bw = 220, bh = 4;
-  const bx = (CANVAS_W - bw) / 2, by = CANVAS_H - 18;
+  const bw = 240, bh = 8;
+  const bx = (CANVAS_W - bw) / 2, by = CANVAS_H - 22;
   ctx.fillStyle = '#2c3142';
   ctx.fillRect(bx, by, bw, bh);
-  const f = Math.min(1, state.descendT / state.descendInterval);
-  ctx.fillStyle = '#c47b6b';
+  const f = Math.max(0, Math.min(1, state.penalty / 10));
+  ctx.fillStyle = state.penalty >= 8 ? '#c47b6b' : '#b59a5f';
   ctx.fillRect(bx, by, bw * f, bh);
+  ctx.strokeStyle = '#3a3f4f';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(bx + 0.5, by + 0.5, bw - 1, bh - 1);
+  ctx.fillStyle = '#b3a98e';
+  ctx.font = '13px Georgia';
+  ctx.textAlign = 'center';
+  ctx.fillText('PENALTY  ' + state.penalty + ' / 10', bx + bw / 2, by - 4);
 }
 
 function drawBursts() {
   for (const b of state.bursts) {
     if (b.isText) {
       const a = 1 - b.t / b.dur;
-      ctx.fillStyle = 'rgba(212, 180, 131,' + a + ')';
-      ctx.font = 'bold 20px Georgia';
-      ctx.textAlign = 'center';
-      ctx.fillText(b.text, b.x, b.y - b.t * 36);
+      if (b.big) {
+        // Level banner: large, holds in place, fades
+        ctx.fillStyle = 'rgba(212, 180, 131,' + (a * 0.95) + ')';
+        ctx.font = 'bold 56px Georgia';
+        ctx.textAlign = 'center';
+        ctx.fillText(b.text, b.x, b.y);
+      } else {
+        ctx.fillStyle = 'rgba(212, 180, 131,' + a + ')';
+        ctx.font = 'bold 20px Georgia';
+        ctx.textAlign = 'center';
+        ctx.fillText(b.text, b.x, b.y - b.t * 36);
+      }
     } else if (b.falling) {
       const a = Math.max(0, 1 - b.t / b.dur);
       ctx.globalAlpha = a;
-      drawBubble(b.x, b.y, b.letter);
+      drawSyllableBox(b.x - b.w / 2, b.y - CELL_H / 2, b.w, CELL_H, b.syllable);
       ctx.globalAlpha = 1;
     } else {
       const p = b.t / b.dur;
-      const r = CELL * 0.42 * (1 + p * 1.4);
+      const grow = 1 + p * 0.5;
       ctx.globalAlpha = Math.max(0, 1 - p);
-      ctx.fillStyle = letterColor(b.letter);
-      ctx.beginPath();
-      ctx.arc(b.x, b.y, r, 0, Math.PI * 2);
-      ctx.fill();
+      drawSyllableBox(b.x - (b.w * grow) / 2, b.y - (CELL_H * grow) / 2, b.w * grow, CELL_H * grow, b.syllable);
       ctx.globalAlpha = 1;
     }
   }
@@ -814,7 +1174,7 @@ function endGame() {
   highScores.push(state.score);
   highScores.sort((a, b) => b - a);
   highScores = highScores.slice(0, 5);
-  try { localStorage.setItem('letterCannon.highScores', JSON.stringify(highScores)); } catch (e) {}
+  try { localStorage.setItem('monkeys10k.highScores', JSON.stringify(highScores)); } catch (e) {}
   document.getElementById('finalScore').textContent = 'Final score: ' + state.score;
   document.getElementById('highscores2').innerHTML = renderScoresHtml();
   document.getElementById('gameover').classList.remove('hidden');
@@ -828,6 +1188,7 @@ function setupInput() {
     else if (e.code === 'ArrowRight') { keyHeld.right = true; useMouseAim = false; e.preventDefault(); }
     else if (e.code === 'Space') { fireShot(); e.preventDefault(); }
     else if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') { swapStash(); e.preventDefault(); }
+    else if (e.code === 'Enter') { manualDescend(); e.preventDefault(); }
   });
   window.addEventListener('keyup', e => {
     if (e.code === 'ArrowLeft') keyHeld.left = false;
@@ -850,7 +1211,7 @@ function setupInput() {
 // ---- Scores ----
 function loadScores() {
   try {
-    const s = localStorage.getItem('letterCannon.highScores');
+    const s = localStorage.getItem('monkeys10k.highScores');
     if (s) highScores = JSON.parse(s) || [];
   } catch (e) { highScores = []; }
 }
@@ -870,9 +1231,16 @@ async function main() {
   ctx = canvas.getContext('2d');
   loadScores();
   document.getElementById('highscores').innerHTML = renderScoresHtml();
-  const [text, dictText] = await Promise.all([loadText(), loadDictText()]);
-  dictionary = buildDictionary(dictText, text);
-  lettersStream = buildLetterStream(text, 8000);
+  const themesText = await loadFile('themes.json');
+  if (themesText) {
+    try {
+      const parsed = JSON.parse(themesText);
+      if (Array.isArray(parsed) && parsed.length) themes = parsed;
+    } catch (e) { console.warn('themes.json could not be parsed:', e); }
+  }
+  if (!themes || !themes.length) {
+    console.error('No themes.json loaded — run build_themes.py to fetch thematic word lists.');
+  }
   setupInput();
 
   const startGame = () => {

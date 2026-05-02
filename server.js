@@ -38,5 +38,5 @@ http.createServer((req, res) => {
     fs.createReadStream(filePath).pipe(res);
   });
 }).listen(PORT, () => {
-  console.log('Letter Cannon — http://localhost:' + PORT + '/');
+  console.log('10,000 Monkeys — http://localhost:' + PORT + '/');
 });
