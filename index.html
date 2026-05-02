@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Word Cloud</title>
+<title>Буки Веди</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body {
@@ -57,6 +57,26 @@
   .scores .row { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px dotted #3a3f4f; }
   .scores .row.head { border-bottom: 1px solid #5a5a4f; color: #d4b483; letter-spacing: 2px; }
   .controls { margin-top: 22px; font-size: 13px; color: #7d7868; letter-spacing: 1px; }
+  .level-list {
+    margin: 26px auto 0;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+    width: 100%; max-width: 720px;
+    justify-items: stretch;
+    justify-content: center;
+  }
+  .level-list button {
+    margin-top: 0;
+    font-size: 18px;
+    padding: 10px 14px;
+    width: 100%;
+  }
+  .level-list button.locked {
+    background: #34384a; color: #6a6657;
+    cursor: not-allowed;
+  }
+  .level-list button.locked:hover { background: #34384a; }
   .hidden { display: none !important; }
 </style>
 </head>
@@ -65,23 +85,28 @@
   <canvas id="game" width="1000" height="960"></canvas>
 
   <div id="menu" class="overlay">
-    <h1>WORD CLOUD</h1>
-    <h2>drag · combine · level up</h2>
-    <p>Drag a syllable bubble. The cloud's gravity pulls everything toward the centre; the others jostle out of the way as you move. When the bubble you're dragging touches another and the two spell a dictionary word (forward or reversed), a green halo lights both pieces.</p>
-    <p>Release to lock the move in — if a word formed, the pair burns and scores. Hit <strong>Space</strong> to send the next syllable falling in from outside the cloud. If the cloud grows so dense that a new arrival can't settle within the play radius, the run is over.</p>
-    <button id="play">PLAY</button>
+    <h1>БУКИ ВЕДИ</h1>
+    <p>Кликайте по слогам, чтобы складывать слова. Найдите половину слов уровня, чтобы пройти дальше.</p>
+    <div id="levelChooser" class="level-list"></div>
     <div class="scores" id="highscores"></div>
-    <div class="controls">CLICK + DRAG a bubble &nbsp;·&nbsp; SPACE to send a new syllable</div>
+    <div class="controls">КЛИК — выбрать слог &nbsp;·&nbsp; ESC — сбросить &nbsp;·&nbsp; ПРОБЕЛ — пять новых слогов</div>
+  </div>
+
+  <div id="levelPicker" class="overlay hidden">
+    <h1>УРОВНИ</h1>
+    <div id="levelPickerList" class="level-list"></div>
+    <button id="levelPickerClose">ЗАКРЫТЬ</button>
   </div>
 
   <div id="gameover" class="overlay hidden">
-    <h1>GAME OVER</h1>
+    <h1>ИГРА ОКОНЧЕНА</h1>
     <p id="finalScore" style="font-size:22px;color:#d4b483;margin-top:10px"></p>
-    <button id="restart">PLAY AGAIN</button>
+    <button id="restart">ИГРАТЬ СНОВА</button>
     <div class="scores" id="highscores2"></div>
   </div>
 </div>
 
+<script src="levels.js"></script>
 <script>
 "use strict";
 
@@ -97,7 +122,8 @@ const GRAVITY = 1560;         // px/s² toward centre at the cloud edge
 const DAMPING = 0.86;          // velocity multiplier per 60-Hz frame-equivalent
 const TOUCH_TOL = 4;           // bubbles within this many pixels are "touching"
 const COLLISION_ITERS = 6;     // positional-correction passes per frame
-const MAX_CLOUD_R = 350;       // game over if a new bubble settles outside this
+const EXIT_RECT   = { x: 14,  y: 14, w: 86,  h: 34 };
+const LEVELS_RECT = { x: 110, y: 14, w: 110, h: 34 };
 
 const PALETTE = [
   '#c47b6b', // burnt rose
@@ -128,8 +154,10 @@ function lighten(hex, amt) {
 // ---- Globals ----
 let canvas, ctx;
 let state = null;
-let dictionary = new Set();   // global validator: any word from words.txt scores
-let themes = null;            // thematic word groups loaded from themes.json
+let dictionary = new Set();   // current level's valid words (rebuilt per level)
+let broaderDict = new Set();  // optional Cyrillic word list for off-level matches
+let levelPack = null;         // selected pack: { name, file }
+let levelData = null;         // array of arrays of words (one inner array per level)
 let syllables = null;         // current level's syllable inventory (cumulative weights)
 let highScores = [];
 
@@ -145,15 +173,13 @@ async function loadFile(url) {
   return null;
 }
 
-// Build the global validator from words.txt. Any word in this set scores when
-// the player concatenates syllables to form it — independent of the theme.
-function buildDictionaryFromText(text) {
+// Build the level's validator: only words listed for the current level count.
+function buildDictionaryFromWords(words) {
   const set = new Set();
-  if (!text) return set;
-  for (const raw of text.split(/\r?\n/)) {
-    const w = raw.trim().toLowerCase();
+  for (const raw of (words || [])) {
+    const w = (raw || '').toLowerCase();
     if (!w || w.length < 4) continue;
-    if (!/^[a-zа-яё]+$/i.test(w)) continue; // keep clean letter-only entries
+    if (!/^[a-zа-яё]+$/i.test(w)) continue;
     set.add(w);
   }
   return set;
@@ -188,63 +214,151 @@ function splitWord(word) {
 }
 
 // Build the level's syllable inventory by splitting each theme word into
-// 2 or 3 parts. Only those parts appear as cannon ammunition. Common parts
-// (showing up in multiple words) get correspondingly higher frequency.
+// 2 or 3 parts. Returns the inventory PLUS a per-word split map so we can
+// later check whether a syllable is still needed by an unfound theme word.
 function buildSyllablesFromWords(words) {
   const counts = new Map();
+  const splits = new Map();   // lowercase word → array of UPPERCASE parts
   for (const raw of words) {
     const w = (raw || '').toLowerCase();
     if (!/^[a-zа-яё]+$/i.test(w)) continue;
     const parts = splitWord(w);
     if (!parts) continue;
-    for (const p of parts) counts.set(p, (counts.get(p) || 0) + 1);
+    const upper = parts.map(p => p.toUpperCase());
+    splits.set(w, upper);
+    for (const p of upper) counts.set(p, (counts.get(p) || 0) + 1);
   }
   const items = [];
   let total = 0;
   for (const [syl, cnt] of counts) {
     total += cnt;
-    items.push({ syl: syl.toUpperCase(), cum: total });
+    items.push({ syl, cum: total });
   }
-  return { items, total };
+  return { items, total, splits };
 }
 
-// Level sizing: level 1 = 6 words / win at 3; each next level adds 2 words
-// and the win threshold is 50% (rounded up) of the level's word count.
-function levelWordCount(level) { return 6 + 2 * (level - 1); }
-function levelWinTarget(level) { return Math.ceil(levelWordCount(level) / 2); }
+// A level entry can be either an array of words OR an object {name, words}.
+function levelEntryAt(level) {
+  if (!levelData || !levelData.length) return null;
+  const idx = Math.min(level - 1, levelData.length - 1);
+  return levelData[idx] || null;
+}
+function levelWordsAt(level) {
+  const e = levelEntryAt(level);
+  if (!e) return [];
+  return Array.isArray(e) ? e : (e.words || []);
+}
+function levelNameAt(level) {
+  const e = levelEntryAt(level);
+  if (!e || Array.isArray(e)) return '';
+  return e.name || '';
+}
+function levelWordCount(level) { return levelWordsAt(level).length; }
+// Half (rounded up) of the level's words advances the player.
+function levelWinTarget(level) { return Math.max(1, Math.ceil(levelWordCount(level) / 2)); }
 
-// Pick the theme for a given level. Themes rotate (level N → theme (N-1) % T).
-// Returns { name, words } — words are picked from the theme, sized to
-// levelWordCount(level).
-function pickLevelSource(level) {
-  if (!themes || !themes.length) {
-    console.error('No themes loaded — run build_themes.py to fetch themes.json.');
-    return { name: '', words: [] };
-  }
-  const t = themes[(level - 1) % themes.length];
-  const pool = (t.words || []).filter(w => typeof w === 'string' && w.length >= 4);
-  const want = levelWordCount(level);
-  // Sample without replacement from the theme's pool.
+// All distinct, sanitised words across levels 1..upTo (inclusive).
+function poolWordsUpTo(upTo) {
   const out = [];
   const seen = new Set();
-  while (out.length < want && pool.length) {
-    const w = pool[(Math.random() * pool.length) | 0];
-    if (seen.has(w)) {
-      // If the pool is smaller than `want`, allow what we have.
-      if (seen.size >= pool.length) break;
-      continue;
+  const max = Math.min(upTo, levelData ? levelData.length : 0);
+  for (let i = 1; i <= max; i++) {
+    const ws = pickLevelSource(i).words;
+    for (const w of ws) {
+      if (seen.has(w)) continue;
+      seen.add(w);
+      out.push(w);
     }
-    seen.add(w);
-    out.push(w);
   }
-  return { name: t.name || ('Theme ' + level), words: out };
+  return out;
 }
 
+// Active pool: pool words still unguessed.
+function activeWords() {
+  if (!state) return [];
+  const found = state.foundLevelWords || new Set();
+  return poolWordsUpTo(state.level).filter(w => !found.has(w));
+}
+
+// Rebuild dictionary + syllable inventory from the active (unguessed) pool.
+// Called whenever state.level changes or state.foundLevelWords gains a word.
+function rebuildPool() {
+  const active = activeWords();
+  dictionary = buildDictionaryFromWords(active);
+  syllables = buildSyllablesFromWords(active);
+}
+
+// How many of the CURRENT level's words have been guessed (across this run)?
+function currentLevelGuessedCount() {
+  if (!state || !state.levelWords) return 0;
+  let n = 0;
+  for (const w of state.levelWords) if (state.foundLevelWords.has(w)) n++;
+  return n;
+}
+
+// Build the sanitised lowercase word list for the given level.
+function pickLevelSource(level) {
+  const raw = levelWordsAt(level);
+  const out = [];
+  const seen = new Set();
+  for (const w of raw) {
+    if (typeof w !== 'string') continue;
+    const lw = w.toLowerCase();
+    if (lw.length < 4 || lw.length > 3 * MAX_PART) continue;
+    if (!/^[a-zа-яё]+$/i.test(lw)) continue;
+    if (seen.has(lw)) continue;
+    seen.add(lw);
+    out.push(lw);
+  }
+  return { name: levelNameAt(level), words: out };
+}
+
+// ---- Per-pack progress (saved in localStorage) ------------------------------
+function packStorageKey(pack) { return 'pack.' + (pack && pack.file); }
+function getPackProgress(pack) {
+  try {
+    const raw = localStorage.getItem(packStorageKey(pack));
+    if (raw) {
+      const p = JSON.parse(raw);
+      return {
+        unlocked: Math.max(1, p.unlocked | 0 || 1),
+        current:  Math.max(1, p.current  | 0 || 1),
+      };
+    }
+  } catch (e) { /* ignore */ }
+  return { unlocked: 1, current: 1 };
+}
+function setPackProgress(pack, p) {
+  try { localStorage.setItem(packStorageKey(pack), JSON.stringify(p)); } catch (e) {}
+}
+function markLevelStarted(pack, level) {
+  const p = getPackProgress(pack);
+  p.current = level;
+  if (level > p.unlocked) p.unlocked = level;
+  setPackProgress(pack, p);
+}
+function markLevelCleared(pack, level) {
+  const p = getPackProgress(pack);
+  const next = level + 1;
+  if (next > p.unlocked) p.unlocked = next;
+  p.current = next;
+  setPackProgress(pack, p);
+}
+
+// Pick a syllable for spawning. A syllable qualifies iff:
+//   1. It is in the active pool's syllable inventory (split parts of every
+//      unguessed word in levels 1..state.level).
+//   2. It is NOT currently on screen (no duplicates allowed).
+// Returns null if no syllable qualifies; spawnNewBubble() silently skips.
 function nextSyllable() {
   const inv = syllables;
-  if (!inv || !inv.items.length) return 'XX';
-  const banned = state && state.bannedSyllables;
-  // Re-sample if we hit a banned syllable; cap attempts so we always return.
+  if (!inv || !inv.items.length) return null;
+  const onScreen = new Set();
+  if (state && state.bubbles) {
+    for (const b of state.bubbles) onScreen.add(b.syllable);
+  }
+  const ok = s => !onScreen.has(s);
+  // Weighted-random sampling.
   for (let attempts = 0; attempts < 60; attempts++) {
     const r = Math.random() * inv.total;
     let lo = 0, hi = inv.items.length - 1;
@@ -253,15 +367,12 @@ function nextSyllable() {
       if (inv.items[mid].cum <= r) lo = mid + 1;
       else hi = mid;
     }
-    const syl = inv.items[lo].syl;
-    if (!banned || !banned.has(syl)) return syl;
+    if (ok(inv.items[lo].syl)) return inv.items[lo].syl;
   }
-  // Every sample hit a banned entry — fall back to the first non-banned item,
-  // or the first item if none qualify.
-  if (banned) {
-    for (const it of inv.items) if (!banned.has(it.syl)) return it.syl;
-  }
-  return inv.items[0].syl;
+  // Deterministic backup if the random sampler kept rolling forbidden picks.
+  for (const it of inv.items) if (ok(it.syl)) return it.syl;
+  // No syllable qualifies — caller skips this spawn.
+  return null;
 }
 
 // ---- Word-cloud helpers ----------------------------------------------------
@@ -307,11 +418,15 @@ function isTouching(a, b) {
 // Push two overlapping bubbles apart along the smaller-overlap axis.
 // The dragged bubble (if either) is fully locked; otherwise we split mass-
 // proportionally.
+function isLocked(id) {
+  return id === state.draggedId || (state.selection && state.selection.indexOf(id) >= 0);
+}
+
 function resolveCollision(a, b) {
   const o = aabbOverlap(a, b);
   if (o.x <= 0 || o.y <= 0) return false;
-  const aLocked = (a.id === state.draggedId);
-  const bLocked = (b.id === state.draggedId);
+  const aLocked = isLocked(a.id);
+  const bLocked = isLocked(b.id);
   if (aLocked && bLocked) return false;
   let aShare, bShare;
   if (aLocked)      { aShare = 0; bShare = 1; }
@@ -345,7 +460,7 @@ function physicsStep(dt) {
   }
   // gravity + damping
   for (const b of state.bubbles) {
-    if (b.id === state.draggedId) continue;
+    if (isLocked(b.id)) continue;
     const dx = CENTER_X - b.x;
     const dy = CENTER_Y - b.y;
     const d = Math.hypot(dx, dy);
@@ -383,22 +498,65 @@ function physicsStep(dt) {
 }
 
 // ---- Word detection (during drag) ------------------------------------------
-// Scan the connected touching-component containing the dragged bubble (capped
-// at MAX_CHAIN bubbles for performance) and try every subset (size ≥ 2 that
-// includes the dragged one) in every permutation. A subset's concatenation
-// is matched against the validator. Multi-piece words like
-// "phon"+"ogra"+"ph" → "phonograph" therefore work as long as the three
-// pieces sit in one touching cluster.
+// A word is recognised ONLY when its syllables sit in a left-to-right row:
+// each consecutive pair must be touching on the x-axis (using the same
+// TOUCH_TOL the physics uses) and overlapping at all on the y-axis.
+// Vertical, diagonal, and non-linear arrangements do nothing.
 const MAX_CHAIN = 5;
 
-function permutations(arr) {
-  if (arr.length <= 1) return [arr.slice()];
-  const out = [];
-  for (let i = 0; i < arr.length; i++) {
-    const rest = arr.slice(0, i).concat(arr.slice(i + 1));
-    for (const p of permutations(rest)) out.push([arr[i], ...p]);
+function alignedHorizontally(a, b) {
+  // Any positive y-overlap qualifies.
+  const yOverlap = (a.h + b.h) / 2 - Math.abs(a.y - b.y);
+  if (yOverlap <= 0) return false;
+  // x-edges must be touching (gap within TOUCH_TOL).
+  const xGap = Math.abs(a.x - b.x) - (a.w + b.w) / 2;
+  return xGap <= TOUCH_TOL;
+}
+
+function rightNeighbour(of) {
+  let best = null, bestDx = Infinity;
+  for (const b of state.bubbles) {
+    if (b.id === of.id) continue;
+    if (b.x <= of.x) continue;                       // must be to the right
+    if (!alignedHorizontally(of, b)) continue;
+    const dx = b.x - of.x;
+    if (dx < bestDx) { bestDx = dx; best = b; }
   }
-  return out;
+  return best;
+}
+
+function leftNeighbour(of) {
+  let best = null, bestDx = Infinity;
+  for (const b of state.bubbles) {
+    if (b.id === of.id) continue;
+    if (b.x >= of.x) continue;                       // must be to the left
+    if (!alignedHorizontally(of, b)) continue;
+    const dx = of.x - b.x;
+    if (dx < bestDx) { bestDx = dx; best = b; }
+  }
+  return best;
+}
+
+function buildHorizontalChain(d) {
+  const chain = [d];
+  const visited = new Set([d.id]);
+  let cur = d;
+  while (chain.length < MAX_CHAIN) {
+    const r = rightNeighbour(cur);
+    if (!r || visited.has(r.id)) break;
+    chain.push(r);
+    visited.add(r.id);
+    cur = r;
+  }
+  cur = d;
+  while (chain.length < MAX_CHAIN) {
+    const l = leftNeighbour(cur);
+    if (!l || visited.has(l.id)) break;
+    chain.unshift(l);
+    visited.add(l.id);
+    cur = l;
+  }
+  return chain;
 }
 
 function findWordsInvolvingDragged() {
@@ -406,73 +564,50 @@ function findWordsInvolvingDragged() {
   if (state.draggedId === null) return out;
   const d = state.bubbles.find(b => b.id === state.draggedId);
   if (!d) return out;
-
-  // BFS the touching graph from the dragged bubble.
-  const component = [d];
-  const visited = new Set([d.id]);
-  let head = 0;
-  while (head < component.length && component.length < MAX_CHAIN) {
-    const a = component[head++];
-    for (const b of state.bubbles) {
-      if (visited.has(b.id)) continue;
-      if (isTouching(a, b)) {
-        component.push(b);
-        visited.add(b.id);
-        if (component.length >= MAX_CHAIN) break;
-      }
-    }
-  }
-
-  const others = component.filter(b => b.id !== d.id);
-  // For each non-empty subset of `others`, build the subset (with d included)
-  // and try every permutation.
-  const masks = 1 << others.length;
+  const chain = buildHorizontalChain(d);
+  const idx = chain.indexOf(d);
+  if (idx < 0 || chain.length < 2) return out;
+  // Every contiguous sub-row including the dragged bubble, read left-to-right.
   const seen = new Set();
-  for (let mask = 1; mask < masks; mask++) {
-    const subset = [d];
-    for (let k = 0; k < others.length; k++) {
-      if (mask & (1 << k)) subset.push(others[k]);
-    }
-    for (const perm of permutations(subset)) {
-      const concat = perm.map(b => b.syllable.toLowerCase()).join('');
+  for (let len = 2; len <= chain.length; len++) {
+    const sLo = Math.max(0, idx - len + 1);
+    const sHi = Math.min(chain.length - len, idx);
+    for (let s = sLo; s <= sHi; s++) {
+      const sub = chain.slice(s, s + len);
+      const concat = sub.map(b => b.syllable.toLowerCase()).join('');
       if (concat.length < 4) continue;
       if (!dictionary.has(concat)) continue;
-      // A word can only be claimed once per level.
-      if (state.foundWords && state.foundWords.has(concat)) continue;
-      // Dedup by the set of bubble ids + word, so we don't list multiple
-      // permutations that all produce the same final word from the same set.
-      const sig = concat + '|' + subset.map(b => b.id).slice().sort().join(',');
-      if (seen.has(sig)) continue;
-      seen.add(sig);
-      out.push({ bubbles: perm.slice(), word: concat });
+      if (state.foundLevelWords && state.foundLevelWords.has(concat)) continue;
+      if (seen.has(concat)) continue;
+      seen.add(concat);
+      out.push({ bubbles: sub.slice(), word: concat });
     }
   }
-  // Longest word first; that's what we'll burn on release.
   out.sort((a, b) => b.word.length - a.word.length);
   return out;
 }
 
-// ---- Drag end + scoring -----------------------------------------------------
+// Drag is purely cosmetic — bubbles re-settle around the user's hand. The
+// match check has been removed; only clicking spells words.
 function onDragEnd() {
-  const matches = findWordsInvolvingDragged();
   state.draggedId = null;
-  if (matches.length) {
-    burnWord(matches[0]);
-  }
-  // No automatic spawn — the player presses Space to send the next bubble in.
 }
 
-function burnWord(match) {
+// Burn the bubbles in `match.bubbles`. Two flavours:
+//   isLevel = true   → green word in the active pool, counts toward progress.
+//   isLevel = false  → off-pool Cyrillic word: burns in soft purple and scores
+//                       at half rate but doesn't advance the level counter.
+function burnWord(match, isLevel) {
   const letters = match.word.length;
-  const gain = scoreFor(letters, 1);
-  state.score += gain;
+  const gain = scoreFor(letters, 1) * (isLevel ? 1 : 0.5);
+  state.score += Math.round(gain);
   state.wordsLog.push(match.word.toUpperCase());
-  state.wordsThisLevel++;
-  state.foundWords.add(match.word);
+  if (isLevel) {
+    state.foundLevelWords.add(match.word);
+  } else {
+    state.foundOtherWords.add(match.word);
+  }
   const ids = new Set(match.bubbles.map(b => b.id));
-  // Ban every participating syllable from future spawns this level. They
-  // remain bannable until installLevel() resets the set.
-  for (const b of match.bubbles) state.bannedSyllables.add(b.syllable);
   for (const b of match.bubbles) {
     state.bursts.push({
       x: b.x, y: b.y, w: b.w,
@@ -483,53 +618,32 @@ function burnWord(match) {
   state.bubbles = state.bubbles.filter(b => !ids.has(b.id));
   state.bursts.push({
     x: CENTER_X, y: CENTER_Y,
-    text: match.word.toUpperCase() + '   +' + gain,
+    text: match.word.toUpperCase() + '   +' + Math.round(gain),
+    color: isLevel ? '#9bbf86' : '#b58cc7',
     t: 0, dur: 1.5, isText: true,
   });
-  // For every word found, send in (combined-syllables + 1) replacements.
-  const incoming = match.bubbles.length + 1;
-  for (let k = 0; k < incoming; k++) spawnNewBubble();
+  // Pool shrinks: rebuild dictionary + syllable inventory excluding this word.
+  if (isLevel) rebuildPool();
+  // Recount progress against the CURRENT level only.
+  state.wordsThisLevel = currentLevelGuessedCount();
+  // Each find drops up to 5 new syllables.
+  dropSyllables(5);
   if (state.wordsThisLevel >= state.wordsToWin) levelUp();
 }
 
 function spawnNewBubble() {
   const syl = nextSyllable();
+  if (!syl) return; // every eligible syllable is banned or already on screen
   const angle = Math.random() * Math.PI * 2;
   const dist = 480;
   const x = CENTER_X + Math.cos(angle) * dist;
   const y = CENTER_Y + Math.sin(angle) * dist;
   const b = makeBubble(syl, x, y);
-  // Initial velocity carries it toward the centre.
   const dx = CENTER_X - x, dy = CENTER_Y - y;
   const d = Math.hypot(dx, dy) || 1;
   b.vx = (dx / d) * 280;
   b.vy = (dy / d) * 280;
   state.bubbles.push(b);
-  // Track the new arrival so we can decide game-over if the cloud is too full
-  // to let it fall inside MAX_CLOUD_R.
-  state.lastSpawned = b.id;
-  state.spawnWatchT = 0;
-}
-
-// If the latest spawned bubble settles outside MAX_CLOUD_R, the cloud has
-// overflowed and the run is over.
-function checkOverflow(dt) {
-  if (state.lastSpawned == null) return;
-  const b = state.bubbles.find(x => x.id === state.lastSpawned);
-  if (!b) {       // burned (it formed a word on the way in?) — clear watch
-    state.lastSpawned = null;
-    return;
-  }
-  state.spawnWatchT += dt;
-  if (state.spawnWatchT < 1.6) return;             // give physics time to settle
-  const speed = Math.hypot(b.vx, b.vy);
-  if (speed > 30 && state.spawnWatchT < 4.0) return; // still in motion, wait more
-  const d = Math.hypot(b.x - CENTER_X, b.y - CENTER_Y);
-  if (d > MAX_CLOUD_R) {
-    endGame();
-  }
-  state.lastSpawned = null;
-  state.spawnWatchT = 0;
 }
 
 // ---- Score schedule (kept) -------------------------------------------------
@@ -538,7 +652,8 @@ function scoreFor(letters, combo) {
 }
 
 // ---- State init -------------------------------------------------------------
-function initState() {
+function initState(startLevel) {
+  startLevel = Math.max(1, startLevel | 0 || 1);
   state = {
     bubbles: [],
     nextBubbleId: 1,
@@ -550,50 +665,56 @@ function initState() {
     gameOver: false,
     bursts: [],
     wordsLog: [],
-    level: 1,
+    level: startLevel,
     levelName: '',
     levelWords: [],
     wordsThisLevel: 0,
-    wordsToWin: levelWinTarget(1),
-    lastSpawned: null,
-    spawnWatchT: 0,
-    bannedSyllables: new Set(),
-    foundWords: new Set(),
+    wordsToWin: levelWinTarget(startLevel),
+    foundLevelWords: new Set(),
+    foundOtherWords: new Set(),
+    selection: [],
+    dragMoved: false,
+    dragStart: null,
   };
-  installLevel(1, true);
+  installLevel(startLevel, true);
+  if (levelPack) markLevelStarted(levelPack, startLevel);
   // Sprinkle an initial cluster around the centre.
-  const seedCount = 9;
-  for (let i = 0; i < seedCount; i++) {
-    const angle = (i / seedCount) * Math.PI * 2 + Math.random() * 0.3;
-    const r = 70 + Math.random() * 60;
-    state.bubbles.push(
-      makeBubble(nextSyllable(), CENTER_X + Math.cos(angle) * r, CENTER_Y + Math.sin(angle) * r)
-    );
-  }
+  dropSyllables(10);
+}
+
+// Drop up to `count` new syllables in from outside the cloud. Each one chooses
+// its own random launch angle inside spawnNewBubble; if the inventory has
+// nothing eligible, the call is a silent no-op so we never crash.
+function dropSyllables(count) {
+  for (let i = 0; i < count; i++) spawnNewBubble();
 }
 
 function installLevel(level, silent) {
   state.level = level;
-  state.wordsThisLevel = 0;
-  state.wordsToWin = levelWinTarget(level);
-  // Per-level resets: banned-syllables list and the found-words ledger.
-  state.bannedSyllables = new Set();
-  state.foundWords = new Set();
+  state.selection = [];
   const src = pickLevelSource(level);
   state.levelName = src.name;
   state.levelWords = src.words;
-  syllables = buildSyllablesFromWords(src.words);
+  state.wordsToWin = levelWinTarget(level);
+  state.wordsThisLevel = currentLevelGuessedCount();
+  // Pool = unguessed words from levels 1..N. Rebuilt every match too.
+  rebuildPool();
   if (!silent) {
     state.bursts.push({
       x: CANVAS_W / 2, y: CENTER_Y,
-      text: 'LEVEL ' + level + (src.name ? '   ·   ' + src.name.toUpperCase() : ''),
+      text: 'УРОВЕНЬ ' + level + (src.name ? '   ·   ' + src.name.toUpperCase() : ''),
       t: 0, dur: 2.4, isText: true, big: true,
     });
   }
 }
 
 function levelUp() {
-  installLevel(state.level + 1, false);
+  if (levelPack) markLevelCleared(levelPack, state.level);
+  const next = Math.min(state.level + 1, levelData ? levelData.length : state.level);
+  // Pool now grows; existing on-screen syllables are still part of valid
+  // unguessed words, so we keep the cloud intact.
+  installLevel(next, false);
+  dropSyllables(10);
 }
 
 // ---- Update / render --------------------------------------------------------
@@ -622,7 +743,6 @@ function update(dt) {
     }
   }
   physicsStep(dt);
-  checkOverflow(dt);
   for (const burst of state.bursts) {
     burst.t += dt;
     if (burst.falling) {
@@ -662,6 +782,18 @@ function render() {
     }
   }
 
+  // Click-to-spell selection halos (gold)
+  if (state.selection && state.selection.length) {
+    ctx.lineWidth = 3.5;
+    ctx.strokeStyle = 'rgba(212, 180, 131, 0.92)';
+    for (const id of state.selection) {
+      const b = state.bubbles.find(x => x.id === id);
+      if (!b) continue;
+      drawRoundedRect(b.x - b.w / 2 - 4, b.y - b.h / 2 - 4, b.w + 8, b.h + 8, 12);
+      ctx.stroke();
+    }
+  }
+
   // Bubbles
   for (const b of state.bubbles) {
     let alpha = 1;
@@ -671,18 +803,99 @@ function render() {
     if (alpha < 1) ctx.globalAlpha = 1;
   }
 
-  // Active-match preview text
-  if (activeMatches.length) {
-    const m = activeMatches[0];
-    ctx.fillStyle = '#9bbf86';
-    ctx.font = 'bold 26px Georgia';
-    ctx.textAlign = 'center';
-    ctx.fillText(m.word.toUpperCase(), CENTER_X, CANVAS_H - 230);
-  }
-
+  drawCurrentSpell();
   drawWordsLine();
   drawHUD();
+  drawExitButton();
+  drawLevelsButton();
   drawBursts();
+}
+
+// Top-of-canvas readout of the syllables the player has clicked so far.
+function drawCurrentSpell() {
+  if (!state.selection || !state.selection.length) return;
+  const bubbles = state.selection
+    .map(id => state.bubbles.find(x => x.id === id))
+    .filter(Boolean);
+  if (!bubbles.length) return;
+  const text = bubbles.map(x => x.syllable).join(' · ');
+  ctx.fillStyle = '#d4b483';
+  ctx.font = 'bold 30px Georgia';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillText(text, CENTER_X, 16);
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawTopButton(rect, label) {
+  ctx.fillStyle = 'rgba(28, 31, 42, 0.92)';
+  drawRoundedRect(rect.x, rect.y, rect.w, rect.h, 8);
+  ctx.fill();
+  ctx.strokeStyle = '#5a6173';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  ctx.fillStyle = '#d4b483';
+  ctx.font = 'bold 14px Georgia';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label, rect.x + rect.w / 2, rect.y + rect.h / 2);
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawExitButton() { drawTopButton(EXIT_RECT, 'ВЫХОД'); }
+function drawLevelsButton() { drawTopButton(LEVELS_RECT, 'УРОВНИ'); }
+
+function pointInRect(rect, x, y) {
+  return x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h;
+}
+function pointInExit(x, y)   { return pointInRect(EXIT_RECT, x, y); }
+function pointInLevels(x, y) { return pointInRect(LEVELS_RECT, x, y); }
+
+// Stop the running game and bring the player back to the level-pack chooser.
+function exitToMenu() {
+  state.gameOver = true;
+  document.getElementById('levelPicker').classList.add('hidden');
+  document.getElementById('menu').classList.remove('hidden');
+}
+
+// Show an overlay listing every level in the current pack. Levels above the
+// player's `unlocked` watermark are visible but disabled.
+function showLevelPicker() {
+  if (!levelPack || !levelData) return;
+  const list = document.getElementById('levelPickerList');
+  list.innerHTML = '';
+  const prog = getPackProgress(levelPack);
+  for (let i = 1; i <= levelData.length; i++) {
+    const btn = document.createElement('button');
+    const name = levelNameAt(i);
+    btn.textContent = name ? (i + ' · ' + name) : ('Уровень ' + i);
+    if (i > prog.unlocked) {
+      btn.classList.add('locked');
+      btn.disabled = true;
+    } else {
+      btn.addEventListener('click', () => {
+        document.getElementById('levelPicker').classList.add('hidden');
+        switchLevel(i);
+      });
+    }
+    list.appendChild(btn);
+  }
+  document.getElementById('levelPicker').classList.remove('hidden');
+}
+
+// Replay an already-unlocked level: rebuild a fresh cloud at the chosen index.
+function switchLevel(level) {
+  markLevelStarted(levelPack, level);
+  // Replay: fresh slate for found-words too, otherwise the pool would already
+  // exclude what the player matched in their previous attempt.
+  state.foundLevelWords = new Set();
+  state.foundOtherWords = new Set();
+  state.bubbles = [];
+  state.bursts = [];
+  state.selection = [];
+  state.draggedId = null;
+  installLevel(level, false);
+  dropSyllables(10);
 }
 
 // ---- Static drawing helpers -------------------------------------------------
@@ -762,18 +975,18 @@ function drawHUD() {
   ctx.fillStyle = '#d4b483';
   ctx.font = 'bold 26px Georgia';
   ctx.textAlign = 'left';
-  ctx.fillText('Score  ' + state.score, 30, CANVAS_H - 22);
+  ctx.fillText('Очки  ' + state.score, 30, CANVAS_H - 22);
 
   ctx.fillStyle = '#b3a98e';
   ctx.font = 'bold 16px Georgia';
   ctx.textAlign = 'left';
-  const labelL = 'LEVEL ' + state.level + (state.levelName ? '  ·  ' + state.levelName.toUpperCase() : '');
+  const labelL = 'УРОВЕНЬ ' + state.level + (state.levelName ? '  ·  ' + state.levelName.toUpperCase() : '');
   ctx.fillText(labelL, 30, CANVAS_H - 56);
 
   ctx.fillStyle = '#7b9c6e';
   ctx.font = 'bold 16px Georgia';
   ctx.textAlign = 'right';
-  ctx.fillText(state.wordsThisLevel + ' / ' + state.wordsToWin + ' words', CANVAS_W - 30, CANVAS_H - 56);
+  ctx.fillText(state.wordsThisLevel + ' / ' + state.wordsToWin + ' слов', CANVAS_W - 30, CANVAS_H - 56);
 
   // Progress bar
   const bw = 240, bh = 6;
@@ -813,7 +1026,16 @@ function drawBursts() {
         ctx.fillText(b.text, b.x, b.y);
         ctx.textBaseline = 'alphabetic';
       } else {
-        ctx.fillStyle = 'rgba(212, 180, 131,' + a + ')';
+        const baseColor = b.color || 'rgba(212, 180, 131,' + a + ')';
+        // If a fixed color was supplied, splice the alpha onto it.
+        if (b.color) {
+          // accept hex like #b58cc7 → rgba(...)
+          const num = parseInt(b.color.replace('#',''), 16);
+          const r = (num >> 16) & 0xff, g = (num >> 8) & 0xff, bl = num & 0xff;
+          ctx.fillStyle = `rgba(${r},${g},${bl},${a})`;
+        } else {
+          ctx.fillStyle = baseColor;
+        }
         ctx.font = 'bold 22px Georgia';
         ctx.textAlign = 'center';
         ctx.fillText(b.text, b.x, b.y - b.t * 36);
@@ -845,12 +1067,35 @@ function endGame() {
   highScores.sort((a, b) => b - a);
   highScores = highScores.slice(0, 5);
   try { localStorage.setItem('monkeys10k.highScores', JSON.stringify(highScores)); } catch (e) {}
-  document.getElementById('finalScore').textContent = 'Final score: ' + state.score;
+  document.getElementById('finalScore').textContent = 'Итоговый счёт: ' + state.score;
   document.getElementById('highscores2').innerHTML = renderScoresHtml();
   document.getElementById('gameover').classList.remove('hidden');
 }
 
-// ---- Input — drag a bubble ----
+// ---- Click-to-spell: each click drops the next bubble at the right of the
+// previous selection, on the same line. When the row spells a dictionary
+// word, it blows up.
+function onBubbleClick(b) {
+  if (state.selection.indexOf(b.id) >= 0) return; // already selected
+  state.selection.push(b.id);
+  // Spelling lives entirely in click-order; bubbles stay where they are.
+  const bubbles = state.selection
+    .map(id => state.bubbles.find(x => x.id === id))
+    .filter(Boolean);
+  const concat = bubbles.map(x => x.syllable.toLowerCase()).join('');
+  if (concat.length < 4) return;
+  if (dictionary.has(concat) && !state.foundLevelWords.has(concat)) {
+    state.selection = [];
+    burnWord({ bubbles, word: concat }, true);
+  } else if (broaderDict.has(concat) && !state.foundOtherWords.has(concat)) {
+    state.selection = [];
+    burnWord({ bubbles, word: concat }, false);
+  }
+}
+
+// ---- Input — drag a bubble OR click-to-spell ----
+const CLICK_VS_DRAG_PX = 5;
+
 function setupInput() {
   function getXY(e) {
     const rect = canvas.getBoundingClientRect();
@@ -864,11 +1109,27 @@ function setupInput() {
     if (!state || state.gameOver) return;
     const { x, y } = getXY(e);
     state.mouseX = x; state.mouseY = y;
+    if (pointInExit(x, y)) {
+      exitToMenu();
+      e.preventDefault();
+      return;
+    }
+    if (pointInLevels(x, y)) {
+      showLevelPicker();
+      e.preventDefault();
+      return;
+    }
     const b = bubbleAt(x, y);
-    if (!b) return;
+    if (!b) {
+      // Click on empty space — reset any in-progress selection.
+      state.selection = [];
+      return;
+    }
+    state.dragStart = { x, y };
+    state.dragMoved = false;
     state.draggedId = b.id;
     state.dragOffset = { x: x - b.x, y: y - b.y };
-    // Move the dragged bubble to the end so it draws on top of the others.
+    // Move the dragged bubble to the end so it draws on top.
     const idx = state.bubbles.indexOf(b);
     if (idx >= 0) {
       state.bubbles.splice(idx, 1);
@@ -880,10 +1141,25 @@ function setupInput() {
     if (!state) return;
     const { x, y } = getXY(e);
     state.mouseX = x; state.mouseY = y;
+    if (state.draggedId !== null && state.dragStart && !state.dragMoved) {
+      const dx = x - state.dragStart.x;
+      const dy = y - state.dragStart.y;
+      if (dx * dx + dy * dy > CLICK_VS_DRAG_PX * CLICK_VS_DRAG_PX) {
+        state.dragMoved = true;
+      }
+    }
   }
   function endDrag(e) {
     if (!state || state.draggedId === null) return;
-    onDragEnd();
+    if (state.dragMoved) {
+      onDragEnd();
+    } else {
+      const b = state.bubbles.find(x => x.id === state.draggedId);
+      state.draggedId = null;
+      if (b) onBubbleClick(b);
+    }
+    state.dragStart = null;
+    state.dragMoved = false;
     e && e.preventDefault && e.preventDefault();
   }
   canvas.addEventListener('mousedown', startDrag);
@@ -892,11 +1168,16 @@ function setupInput() {
   canvas.addEventListener('touchstart', startDrag, { passive: false });
   window.addEventListener('touchmove', moveDrag, { passive: false });
   window.addEventListener('touchend', endDrag);
-  // Space bar sends the next syllable into the cloud.
   window.addEventListener('keydown', e => {
     if (!state || state.gameOver) return;
+    if (e.code === 'Escape') {
+      // Cancel any in-progress click-spell selection.
+      state.selection = [];
+      e.preventDefault();
+      return;
+    }
     if (e.code === 'Space' && state.draggedId === null) {
-      spawnNewBubble();
+      dropSyllables(5);
       e.preventDefault();
     }
   });
@@ -911,8 +1192,8 @@ function loadScores() {
 }
 
 function renderScoresHtml() {
-  if (!highScores.length) return '<div class="row head"><span>HIGH SCORES</span><span>—</span></div><div class="row"><span>no scores yet</span><span></span></div>';
-  let s = '<div class="row head"><span>HIGH SCORES</span><span></span></div>';
+  if (!highScores.length) return '<div class="row head"><span>ЛУЧШИЕ РЕЗУЛЬТАТЫ</span><span>—</span></div><div class="row"><span>пока нет</span><span></span></div>';
+  let s = '<div class="row head"><span>ЛУЧШИЕ РЕЗУЛЬТАТЫ</span><span></span></div>';
   for (let i = 0; i < highScores.length; i++) {
     s += '<div class="row"><span>#' + (i + 1) + '</span><span>' + highScores[i] + '</span></div>';
   }
@@ -920,42 +1201,82 @@ function renderScoresHtml() {
 }
 
 // ---- Bootstrap ----
+function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error('Failed to load ' + src));
+    document.head.appendChild(s);
+  });
+}
+
+function renderLevelChooser() {
+  const list = document.getElementById('levelChooser');
+  list.innerHTML = '';
+  const packs = (typeof window !== 'undefined' && window.LEVELS) ? window.LEVELS : [];
+  if (!packs.length) {
+    list.innerHTML = '<p style="color:#c9c2b3">No levels in <code>levels.js</code>.</p>';
+    return;
+  }
+  for (const pack of packs) {
+    const btn = document.createElement('button');
+    btn.textContent = pack.name || pack.file;
+    btn.addEventListener('click', () => startGameWithPack(pack));
+    list.appendChild(btn);
+  }
+}
+
+async function startGameWithPack(pack) {
+  // Lazy-load the pack's data file (must populate window.LEVEL_DATA[pack.file]).
+  if (!window.LEVEL_DATA || !window.LEVEL_DATA[pack.file]) {
+    try { await loadScript(pack.file); }
+    catch (e) { console.error(e); return; }
+  }
+  const data = window.LEVEL_DATA && window.LEVEL_DATA[pack.file];
+  if (!Array.isArray(data) || !data.length) {
+    console.error('Pack', pack.file, 'did not provide a valid array of level word-lists.');
+    return;
+  }
+  levelPack = pack;
+  levelData = data;
+  document.getElementById('menu').classList.add('hidden');
+  document.getElementById('gameover').classList.add('hidden');
+  // Resume at the player's saved spot, clamped to what's available.
+  const prog = getPackProgress(pack);
+  const startLvl = Math.min(Math.max(1, prog.current), levelData.length);
+  initState(startLvl);
+  requestAnimationFrame(loop);
+}
+
 async function main() {
   canvas = document.getElementById('game');
   ctx = canvas.getContext('2d');
   loadScores();
   document.getElementById('highscores').innerHTML = renderScoresHtml();
-  const [wordsText, dictText, themesText] = await Promise.all([
-    loadFile('words.txt'),
-    loadFile('dict.txt'),
-    loadFile('themes.json'),
-  ]);
-  // words.txt is canonical; dict.txt is accepted as a fallback for convenience.
-  dictionary = buildDictionaryFromText(wordsText || dictText);
-  if (!dictionary.size) {
-    console.error('No words.txt or dict.txt loaded — combos validate against this file.');
-  } else {
-    console.log('word list loaded:', dictionary.size, 'valid words');
-  }
-  if (themesText) {
-    try {
-      const parsed = JSON.parse(themesText);
-      if (Array.isArray(parsed) && parsed.length) themes = parsed;
-    } catch (e) { console.warn('themes.json could not be parsed:', e); }
-  }
-  if (!themes || !themes.length) {
-    console.error('No themes.json loaded — run build_themes.py to fetch thematic word lists.');
+  // Optional broader Cyrillic dictionary — words.txt is canonical, dict.txt is
+  // accepted as a fallback. Combos that match this set but NOT the level's
+  // word list still burn (in a different colour) but don't advance the level.
+  const broaderText = (await loadFile('words.txt')) || (await loadFile('dict.txt'));
+  if (broaderText) {
+    broaderDict = new Set();
+    for (const line of broaderText.split(/\r?\n/)) {
+      const w = line.trim().toLowerCase();
+      if (!w || w.length < 4) continue;
+      if (!/^[а-яё]+$/i.test(w)) continue;
+      broaderDict.add(w);
+    }
+    console.log('broader dict loaded:', broaderDict.size, 'words');
   }
   setupInput();
-
-  const startGame = () => {
-    document.getElementById('menu').classList.add('hidden');
+  renderLevelChooser();
+  document.getElementById('restart').addEventListener('click', () => {
     document.getElementById('gameover').classList.add('hidden');
-    initState();
-    requestAnimationFrame(loop);
-  };
-  document.getElementById('play').addEventListener('click', startGame);
-  document.getElementById('restart').addEventListener('click', startGame);
+    document.getElementById('menu').classList.remove('hidden');
+  });
+  document.getElementById('levelPickerClose').addEventListener('click', () => {
+    document.getElementById('levelPicker').classList.add('hidden');
+  });
 }
 
 main();
