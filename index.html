@@ -123,22 +123,36 @@ let highScores = [];
 let useMouseAim = false;
 const keyHeld = { left: false, right: false };
 
-// ---- Text loading ----
-async function loadText() {
+// ---- Resource loading ----
+async function loadFile(url) {
   try {
-    const r = await fetch('text-rus.txt');
+    const r = await fetch(url);
     if (r.ok) {
       const t = await r.text();
-      if (t && t.length > 200) return t;
+      if (t && t.length > 0) return t;
     }
-  } catch (e) { /* file:// fallback */ }
+  } catch (e) { /* file:// — fall through */ }
+  return null;
+}
+
+async function loadText() {
+  const t = await loadFile('text-rus.txt');
+  if (t) return t;
   const el = document.getElementById('fallback-text');
   return el ? el.textContent : 'the quick brown fox jumps over the lazy dog';
 }
 
-function buildDictionary(text) {
+async function loadDictText() {
+  const t = await loadFile('dict-rus.txt');
+  if (t) return t;
+  // Fallback: derive a small dictionary from the source text itself
+  return null;
+}
+
+function buildDictionary(dictText, sourceText) {
   const out = new Set();
-  const words = text.toLowerCase().match(/[а-яёa-z]+/gi) || [];
+  const raw = (dictText || sourceText).toLowerCase();
+  const words = raw.match(/[а-яёa-z]+/gi) || [];
   for (const w of words) if (w.length >= 3) out.add(w);
   return out;
 }
@@ -856,8 +870,8 @@ async function main() {
   ctx = canvas.getContext('2d');
   loadScores();
   document.getElementById('highscores').innerHTML = renderScoresHtml();
-  const text = await loadText();
-  dictionary = buildDictionary(text);
+  const [text, dictText] = await Promise.all([loadText(), loadDictText()]);
+  dictionary = buildDictionary(dictText, text);
   lettersStream = buildLetterStream(text, 8000);
   setupInput();
 
