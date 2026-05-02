@@ -126,7 +126,7 @@ const keyHeld = { left: false, right: false };
 // ---- Text loading ----
 async function loadText() {
   try {
-    const r = await fetch('text.txt');
+    const r = await fetch('text-rus.txt');
     if (r.ok) {
       const t = await r.text();
       if (t && t.length > 200) return t;
@@ -138,13 +138,13 @@ async function loadText() {
 
 function buildDictionary(text) {
   const out = new Set();
-  const words = text.toLowerCase().match(/[a-z]+/g) || [];
+  const words = text.toLowerCase().match(/[а-яёa-z]+/gi) || [];
   for (const w of words) if (w.length >= 3) out.add(w);
   return out;
 }
 
 function buildLetterStream(text, length) {
-  const words = text.match(/[A-Za-z]+/g) || [];
+  const words = text.match(/[А-ЯЁа-яёA-Za-z]+/g) || [];
   const items = [];
   words.forEach((w, i) => {
     for (const c of w.toUpperCase()) items.push({ ch: c, wid: i });
