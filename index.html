@@ -15,7 +15,7 @@
   body { display: flex; align-items: center; justify-content: center; padding: 8px; }
   #wrap {
     position: relative;
-    width: min(100vw - 16px, calc((100vh - 16px) * 1000 / 960));
+    width: min(calc(100vw - 16px), calc((100vh - 16px) * 1000 / 960));
     aspect-ratio: 1000 / 960;
   }
   canvas {
@@ -243,14 +243,25 @@ function pickLevelSource(level) {
 function nextSyllable() {
   const inv = syllables;
   if (!inv || !inv.items.length) return 'XX';
-  const r = Math.random() * inv.total;
-  let lo = 0, hi = inv.items.length - 1;
-  while (lo < hi) {
-    const mid = (lo + hi) >>> 1;
-    if (inv.items[mid].cum <= r) lo = mid + 1;
-    else hi = mid;
+  const banned = state && state.bannedSyllables;
+  // Re-sample if we hit a banned syllable; cap attempts so we always return.
+  for (let attempts = 0; attempts < 60; attempts++) {
+    const r = Math.random() * inv.total;
+    let lo = 0, hi = inv.items.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (inv.items[mid].cum <= r) lo = mid + 1;
+      else hi = mid;
+    }
+    const syl = inv.items[lo].syl;
+    if (!banned || !banned.has(syl)) return syl;
   }
-  return inv.items[lo].syl;
+  // Every sample hit a banned entry — fall back to the first non-banned item,
+  // or the first item if none qualify.
+  if (banned) {
+    for (const it of inv.items) if (!banned.has(it.syl)) return it.syl;
+  }
+  return inv.items[0].syl;
 }
 
 // ---- Word-cloud helpers ----------------------------------------------------
@@ -372,22 +383,71 @@ function physicsStep(dt) {
 }
 
 // ---- Word detection (during drag) ------------------------------------------
-// While the player drags a bubble, find every adjacent (touching) bubble whose
-// concatenation with the dragged one — in either order — is in the validator.
+// Scan the connected touching-component containing the dragged bubble (capped
+// at MAX_CHAIN bubbles for performance) and try every subset (size ≥ 2 that
+// includes the dragged one) in every permutation. A subset's concatenation
+// is matched against the validator. Multi-piece words like
+// "phon"+"ogra"+"ph" → "phonograph" therefore work as long as the three
+// pieces sit in one touching cluster.
+const MAX_CHAIN = 5;
+
+function permutations(arr) {
+  if (arr.length <= 1) return [arr.slice()];
+  const out = [];
+  for (let i = 0; i < arr.length; i++) {
+    const rest = arr.slice(0, i).concat(arr.slice(i + 1));
+    for (const p of permutations(rest)) out.push([arr[i], ...p]);
+  }
+  return out;
+}
+
 function findWordsInvolvingDragged() {
   const out = [];
   if (state.draggedId === null) return out;
   const d = state.bubbles.find(b => b.id === state.draggedId);
   if (!d) return out;
-  const da = d.syllable.toLowerCase();
-  for (const b of state.bubbles) {
-    if (b.id === d.id) continue;
-    if (!isTouching(b, d)) continue;
-    const bs = b.syllable.toLowerCase();
-    if (dictionary.has(da + bs))      out.push({ bubbles: [d, b], word: da + bs });
-    else if (dictionary.has(bs + da)) out.push({ bubbles: [b, d], word: bs + da });
+
+  // BFS the touching graph from the dragged bubble.
+  const component = [d];
+  const visited = new Set([d.id]);
+  let head = 0;
+  while (head < component.length && component.length < MAX_CHAIN) {
+    const a = component[head++];
+    for (const b of state.bubbles) {
+      if (visited.has(b.id)) continue;
+      if (isTouching(a, b)) {
+        component.push(b);
+        visited.add(b.id);
+        if (component.length >= MAX_CHAIN) break;
+      }
+    }
   }
-  // Sort by word length (longer wins)
+
+  const others = component.filter(b => b.id !== d.id);
+  // For each non-empty subset of `others`, build the subset (with d included)
+  // and try every permutation.
+  const masks = 1 << others.length;
+  const seen = new Set();
+  for (let mask = 1; mask < masks; mask++) {
+    const subset = [d];
+    for (let k = 0; k < others.length; k++) {
+      if (mask & (1 << k)) subset.push(others[k]);
+    }
+    for (const perm of permutations(subset)) {
+      const concat = perm.map(b => b.syllable.toLowerCase()).join('');
+      if (concat.length < 4) continue;
+      if (!dictionary.has(concat)) continue;
+      // A word can only be claimed once per level.
+      if (state.foundWords && state.foundWords.has(concat)) continue;
+      // Dedup by the set of bubble ids + word, so we don't list multiple
+      // permutations that all produce the same final word from the same set.
+      const sig = concat + '|' + subset.map(b => b.id).slice().sort().join(',');
+      if (seen.has(sig)) continue;
+      seen.add(sig);
+      out.push({ bubbles: perm.slice(), word: concat });
+    }
+  }
+  // Longest word first; that's what we'll burn on release.
   out.sort((a, b) => b.word.length - a.word.length);
   return out;
 }
@@ -408,7 +468,11 @@ function burnWord(match) {
   state.score += gain;
   state.wordsLog.push(match.word.toUpperCase());
   state.wordsThisLevel++;
+  state.foundWords.add(match.word);
   const ids = new Set(match.bubbles.map(b => b.id));
+  // Ban every participating syllable from future spawns this level. They
+  // remain bannable until installLevel() resets the set.
+  for (const b of match.bubbles) state.bannedSyllables.add(b.syllable);
   for (const b of match.bubbles) {
     state.bursts.push({
       x: b.x, y: b.y, w: b.w,
@@ -422,6 +486,9 @@ function burnWord(match) {
     text: match.word.toUpperCase() + '   +' + gain,
     t: 0, dur: 1.5, isText: true,
   });
+  // For every word found, send in (combined-syllables + 1) replacements.
+  const incoming = match.bubbles.length + 1;
+  for (let k = 0; k < incoming; k++) spawnNewBubble();
   if (state.wordsThisLevel >= state.wordsToWin) levelUp();
 }
 
@@ -490,6 +557,8 @@ function initState() {
     wordsToWin: levelWinTarget(1),
     lastSpawned: null,
     spawnWatchT: 0,
+    bannedSyllables: new Set(),
+    foundWords: new Set(),
   };
   installLevel(1, true);
   // Sprinkle an initial cluster around the centre.
@@ -507,6 +576,9 @@ function installLevel(level, silent) {
   state.level = level;
   state.wordsThisLevel = 0;
   state.wordsToWin = levelWinTarget(level);
+  // Per-level resets: banned-syllables list and the found-words ledger.
+  state.bannedSyllables = new Set();
+  state.foundWords = new Set();
   const src = pickLevelSource(level);
   state.levelName = src.name;
   state.levelWords = src.words;
@@ -718,10 +790,28 @@ function drawBursts() {
     if (b.isText) {
       const a = 1 - b.t / b.dur;
       if (b.big) {
-        ctx.fillStyle = 'rgba(212, 180, 131,' + (a * 0.95) + ')';
-        ctx.font = 'bold 56px Georgia';
+        // Hold full opacity for most of the duration, fade only at the end.
+        const fade = 0.6;
+        const alpha = b.t < b.dur - fade ? 1 : Math.max(0, (b.dur - b.t) / fade);
+        ctx.font = 'bold 64px Georgia';
         ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const tw = ctx.measureText(b.text).width;
+        const padX = 36, padY = 22;
+        const bw = tw + padX * 2;
+        const bh = 64 + padY * 2;
+        const bx = b.x - bw / 2;
+        const by = b.y - bh / 2;
+        // Solid backdrop so the banner sits clearly above the cloud below it.
+        ctx.fillStyle = 'rgba(20, 22, 30,' + (alpha * 0.94) + ')';
+        drawRoundedRect(bx, by, bw, bh, 14);
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(212, 180, 131,' + (alpha * 0.85) + ')';
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(232, 200, 150,' + alpha + ')';
         ctx.fillText(b.text, b.x, b.y);
+        ctx.textBaseline = 'alphabetic';
       } else {
         ctx.fillStyle = 'rgba(212, 180, 131,' + a + ')';
         ctx.font = 'bold 22px Georgia';
