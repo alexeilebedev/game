@@ -293,7 +293,10 @@ function splitWord(word) {
   const candidates = [];          // p1 values
   const weights = [];
   const centre = L / 2;
-  const sigma = Math.max(1, L / 5);
+  // Tight bias: even for long words the cut almost always lands within one
+  // letter of the middle. Constant sigma so the bias doesn't relax with
+  // length.
+  const sigma = 0.8;
   let total = 0;
   for (let p1 = MIN_PART; p1 <= L - MIN_PART; p1++) {
     const d = p1 - centre;
@@ -847,6 +850,8 @@ function initState(startLevel, saved) {
     hintBubbleIds: [],
     hintTTL: 0,
     hintCooldown: 0,
+    endingShown: false,
+    autoSaveT: 0,
   };
   installLevel(startLevel, true);
   if (levelPack) markLevelStarted(levelPack, startLevel);
@@ -891,10 +896,22 @@ function installLevel(level, silent) {
 
 function levelUp() {
   if (levelPack) markLevelCleared(levelPack, state.level);
-  const next = Math.min(state.level + 1, levelData ? levelData.length : state.level);
-  // Pool now grows; existing on-screen syllables are still part of valid
-  // unguessed words, so we keep the cloud intact.
-  installLevel(next, false);
+  const isLast = !!levelData && state.level >= levelData.length;
+  if (isLast) {
+    // No more levels to install; suppress the re-announcement banner.
+    // The ending banner only fires once every word in every unlocked level
+    // has been found.
+    if (totalGuessedWordCount() >= totalUnlockedWordCount() && !state.endingShown) {
+      state.endingShown = true;
+      state.bursts.push({
+        x: CANVAS_W / 2, y: CENTER_Y,
+        text: 'С ПЕРЕРОЖДЕНИЕМ!',
+        t: 0, dur: 5.0, isText: true, big: true,
+      });
+    }
+    return;
+  }
+  installLevel(state.level + 1, false);
   dropSyllables(10);
 }
 
@@ -927,6 +944,12 @@ function update(dt) {
   physicsStep(dt);
   if (state.hintTTL > 0) state.hintTTL = Math.max(0, state.hintTTL - dt);
   if (state.hintCooldown > 0) state.hintCooldown = Math.max(0, state.hintCooldown - dt);
+  // Auto-save every 60 seconds so a tab close doesn't cost progress.
+  state.autoSaveT = (state.autoSaveT || 0) + dt;
+  if (state.autoSaveT >= 60) {
+    state.autoSaveT = 0;
+    if (levelPack) persistFoundWords(levelPack);
+  }
   for (const burst of state.bursts) {
     burst.t += dt;
     if (burst.falling) {
