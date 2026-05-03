@@ -92,6 +92,35 @@
     cursor: not-allowed;
   }
   .level-list button.locked:hover { background: #34384a; }
+  #wordsList { padding: 18px 24px; }
+  #wordsList h1 { font-size: 32px; letter-spacing: 4px; margin-bottom: 10px; }
+  #wordsListContent {
+    width: 100%; max-width: 920px;
+    max-height: 78vh; overflow-y: auto;
+    text-align: left;
+    padding: 2px 6px;
+    font-size: 12px;
+    line-height: 1.25;
+  }
+  .words-level {
+    margin: 0;
+    padding: 3px 0;
+    border-bottom: 1px dotted #2c3142;
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+  .words-level h3 {
+    color: #d4b483; font-size: 12px; font-weight: normal;
+    letter-spacing: 1px; margin: 0;
+    flex: 0 0 110px;            /* fixed left column for level name */
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .words-level h3 .count { color: #7d7868; font-size: 10px; margin-left: 6px; }
+  .words-grid { display: flex; flex-wrap: wrap; gap: 2px 10px; flex: 1 1 auto; }
+  .words-grid .word { font-size: 12px; }
+  .words-grid .word.found { color: #d4b483; font-weight: bold; }
+  .words-grid .word.missing { color: #5a5a4f; letter-spacing: 1px; }
   .hidden { display: none !important; }
 </style>
 </head>
@@ -105,11 +134,9 @@
     <div class="intro">
       <p><strong>Об игре.</strong> Слова взяты из книги и появляются в порядке возрастания сложности. Уровни названы в честь глав романа.</p>
       <p><strong>Как играть.</strong> Кликайте по слогам, чтобы складывать слова. Найдите больше половины слов уровня и расчистите тучу — тогда откроется следующий уровень.</p>
-      <p><strong>Очки.</strong> Любое русское слово принимается и приносит очки, но только слова из книги приближают к следующему уровню.</p>
       <p><strong>Если застряли.</strong> Нажмите <strong>ПРОБЕЛ</strong> — упадут ещё пять слогов. Кнопка <strong>ПОДСКАЗКА</strong> подсветит готовое слово (раз в полторы минуты).</p>
     </div>
     <div id="levelChooser" class="level-list"></div>
-    <div class="scores" id="highscores"></div>
     <div class="controls">КЛИК — выбрать слог &nbsp;·&nbsp; ESC — сбросить &nbsp;·&nbsp; ПРОБЕЛ — пять слогов раньше</div>
   </div>
 
@@ -117,6 +144,12 @@
     <h1>УРОВНИ</h1>
     <div id="levelPickerList" class="level-list"></div>
     <button id="levelPickerClose">ЗАКРЫТЬ</button>
+  </div>
+
+  <div id="wordsList" class="overlay hidden">
+    <h1>СЛОВА</h1>
+    <div id="wordsListContent"></div>
+    <button id="wordsListClose">ЗАКРЫТЬ</button>
   </div>
 
   <div id="gameover" class="overlay hidden">
@@ -143,8 +176,11 @@ const GRAVITY = 1560;         // px/s² toward centre at the cloud edge
 const DAMPING = 0.86;          // velocity multiplier per 60-Hz frame-equivalent
 const TOUCH_TOL = 4;           // bubbles within this many pixels are "touching"
 const COLLISION_ITERS = 6;     // positional-correction passes per frame
-const EXIT_RECT   = { x: 14,  y: 14, w: 86,  h: 34 };
-const LEVELS_RECT = { x: 110, y: 14, w: 110, h: 34 };
+const EXIT_RECT    = { x: 14,  y: 14, w: 86,  h: 34 };
+const LEVELS_RECT  = { x: 110, y: 14, w: 110, h: 34 };
+// HUD-area click target for the global word counter — populated each frame
+// in drawHUD() because its width depends on the rendered text.
+const COUNTER_RECT = { x: 0, y: 0, w: 0, h: 0 };
 const HINT_RECT   = { x: 260, y: 14, w: 110, h: 34 };
 const HINT_COOLDOWN = 90;  // seconds between hint uses (1:30)
 const HINT_TTL      = 5;   // seconds the hint halo stays visible
@@ -179,7 +215,6 @@ function lighten(hex, amt) {
 let canvas, ctx;
 let state = null;
 let dictionary = new Set();   // current level's valid words (rebuilt per level)
-let broaderDict = new Set();  // optional Cyrillic word list for off-level matches
 let levelPack = null;         // selected pack: { name, file }
 let levelData = null;         // array of arrays of words (one inner array per level)
 let syllables = null;         // current level's syllable inventory (cumulative weights)
@@ -344,25 +379,23 @@ function getPackProgress(pack) {
       return {
         unlocked:    Math.max(1, p.unlocked | 0 || 1),
         current:     Math.max(1, p.current  | 0 || 1),
-        score:       Number.isFinite(p.score) ? Math.max(0, p.score | 0) : 0,
         foundLevel:  Array.isArray(p.foundLevel)  ? p.foundLevel.slice()  : [],
-        foundOther:  Array.isArray(p.foundOther)  ? p.foundOther.slice()  : [],
+        wordsLog:    Array.isArray(p.wordsLog)    ? p.wordsLog.slice()    : [],
       };
     }
   } catch (e) { /* ignore */ }
-  return { unlocked: 1, current: 1, score: 0, foundLevel: [], foundOther: [] };
+  return { unlocked: 1, current: 1, foundLevel: [], wordsLog: [] };
 }
 function setPackProgress(pack, p) {
   try { localStorage.setItem(packStorageKey(pack), JSON.stringify(p)); } catch (e) {}
 }
-// Persist the in-memory progress (score + found-word sets) into the pack's
-// saved blob. Called every time a level is reached.
+// Persist the in-memory progress (found words + recent ticker) into the
+// pack's saved blob. Called every time a level is reached.
 function persistFoundWords(pack) {
   if (!pack || !state) return;
   const p = getPackProgress(pack);
-  p.score = state.score | 0;
   p.foundLevel = state.foundLevelWords ? [...state.foundLevelWords] : [];
-  p.foundOther = state.foundOtherWords ? [...state.foundOtherWords] : [];
+  p.wordsLog = state.wordsLog ? state.wordsLog.slice(-50) : [];
   setPackProgress(pack, p);
 }
 function markLevelStarted(pack, level) {
@@ -627,22 +660,11 @@ function onDragEnd() {
   state.draggedId = null;
 }
 
-// Burn the bubbles in `match.bubbles`. Two flavours:
-//   isLevel = true   → green word in the active pool, counts toward progress.
-//   isLevel = false  → off-pool Cyrillic word: burns in soft purple and scores
-//                       at half rate but doesn't advance the level counter.
-function burnWord(match, isLevel) {
-  const letters = match.word.length;
-  const gain = scoreFor(letters, 1) * (isLevel ? 1 : 0.5);
-  state.score += Math.round(gain);
-  // Only secret-set (level-pool) words get logged in the running ticker;
-  // off-pool Cyrillic words still get the toast but stay out of the tape.
-  if (isLevel) {
-    state.wordsLog.push(match.word.toUpperCase());
-    state.foundLevelWords.add(match.word);
-  } else {
-    state.foundOtherWords.add(match.word);
-  }
+// Burn the bubbles forming a discovered secret word.
+function burnWord(match) {
+  state.wordsLog.push(match.word.toUpperCase());
+  if (state.wordsLog.length > 50) state.wordsLog.splice(0, state.wordsLog.length - 50);
+  state.foundLevelWords.add(match.word);
   const ids = new Set(match.bubbles.map(b => b.id));
   for (const b of match.bubbles) {
     state.bursts.push({
@@ -654,13 +676,12 @@ function burnWord(match, isLevel) {
   state.bubbles = state.bubbles.filter(b => !ids.has(b.id));
   state.bursts.push({
     x: CENTER_X, y: CENTER_Y,
-    text: match.word.toUpperCase() + '   +' + Math.round(gain),
-    color: isLevel ? '#9bbf86' : '#b58cc7',
+    text: match.word.toUpperCase(),
+    color: '#9bbf86',
     t: 0, dur: 2.6, isText: true, slide: true,
   });
   // Pool shrinks: rebuild dictionary + syllable inventory excluding this word.
-  if (isLevel) rebuildPool();
-  // Recount progress against the CURRENT level only.
+  rebuildPool();
   state.wordsThisLevel = currentLevelGuessedCount();
   // After a burn, drop 5 new syllables — but only 2 if the cloud is already
   // dense (≥ 20 letters on screen) to avoid runaway clutter.
@@ -700,25 +721,24 @@ function scoreFor(letters, combo) {
 function initState(startLevel, saved) {
   startLevel = Math.max(1, startLevel | 0 || 1);
   const restoredLevel = (saved && Array.isArray(saved.foundLevel)) ? saved.foundLevel : [];
-  const restoredOther = (saved && Array.isArray(saved.foundOther)) ? saved.foundOther : [];
+  const restoredLog   = (saved && Array.isArray(saved.wordsLog))   ? saved.wordsLog.slice(-50) : [];
   state = {
     bubbles: [],
     nextBubbleId: 1,
     draggedId: null,
     dragOffset: { x: 0, y: 0 },
     mouseX: CENTER_X, mouseY: CENTER_Y,
-    score: (saved && Number.isFinite(saved.score)) ? Math.max(0, saved.score | 0) : 0,
+    score: 0,
     lastT: 0,
     gameOver: false,
     bursts: [],
-    wordsLog: [],
+    wordsLog: restoredLog,
     level: startLevel,
     levelName: '',
     levelWords: [],
     wordsThisLevel: 0,
     wordsToWin: levelWinTarget(startLevel),
     foundLevelWords: new Set(restoredLevel),
-    foundOtherWords: new Set(restoredOther),
     selection: [],
     dragMoved: false,
     dragStart: null,
@@ -1080,6 +1100,39 @@ function showLevelPicker() {
   document.getElementById('levelPicker').classList.remove('hidden');
 }
 
+// Modal showing every word across unlocked levels: guessed words highlighted,
+// unguessed shown as length-matched dot placeholders.
+function showWordsList() {
+  if (!levelPack || !levelData || !state) return;
+  const root = document.getElementById('wordsListContent');
+  root.innerHTML = '';
+  const found = state.foundLevelWords || new Set();
+  const upTo = Math.min(state.level, levelData.length);
+  for (let i = 1; i <= upTo; i++) {
+    const src = pickLevelSource(i);
+    const block = document.createElement('div');
+    block.className = 'words-level';
+    const h = document.createElement('h3');
+    const name = levelNameAt(i);
+    const got = src.words.filter(w => found.has(w)).length;
+    h.innerHTML = (name ? (i + ' · ' + name) : ('Уровень ' + i)) +
+      '<span class="count">' + got + ' / ' + src.words.length + '</span>';
+    block.appendChild(h);
+    const grid = document.createElement('div');
+    grid.className = 'words-grid';
+    for (const w of src.words) {
+      const span = document.createElement('span');
+      const isFound = found.has(w);
+      span.className = 'word ' + (isFound ? 'found' : 'missing');
+      span.textContent = isFound ? w.toUpperCase() : '·'.repeat(w.length);
+      grid.appendChild(span);
+    }
+    block.appendChild(grid);
+    root.appendChild(block);
+  }
+  document.getElementById('wordsList').classList.remove('hidden');
+}
+
 // Replay an already-unlocked level: rebuild a fresh cloud at the chosen index.
 function switchLevel(level) {
   // Forget any words guessed at this level or later — the player is
@@ -1090,6 +1143,9 @@ function switchLevel(level) {
       for (const w of pickLevelSource(i).words) drop.add(w);
     }
     for (const w of drop) state.foundLevelWords.delete(w);
+    // Drop those same words from the ticker so it doesn't show ghosts of
+    // entries the player just unwound.
+    state.wordsLog = state.wordsLog.filter(uw => !drop.has(uw.toLowerCase()));
   }
   // Roll back the unlock watermark too: clicking an earlier level relocks
   // everything above it. The player has to play forward again.
@@ -1177,7 +1233,7 @@ function drawSyllableBoxInverted(x, y, w, h, syllable, bgColor, fgColor) {
 
 function drawWordsLine() {
   if (!state.wordsLog || !state.wordsLog.length) return;
-  const y = CANVAS_H - 110;
+  const y = CANVAS_H - 75;
   const padX = 30;
   const maxW = CANVAS_W - padX * 2;
   ctx.font = 'bold 22px Georgia';
@@ -1205,33 +1261,83 @@ function drawWordsLine() {
 }
 
 function drawHUD() {
+  // Slim 50-px strip; level / progress bar / counter on a single row.
+  const stripH = 50;
   ctx.fillStyle = '#262b3a';
-  ctx.fillRect(0, CANVAS_H - 90, CANVAS_W, 90);
+  ctx.fillRect(0, CANVAS_H - stripH, CANVAS_W, stripH);
 
-  ctx.fillStyle = '#d4b483';
-  ctx.font = 'bold 26px Georgia';
-  ctx.textAlign = 'left';
-  ctx.fillText('Очки  ' + state.score, 30, CANVAS_H - 22);
+  const cy = CANVAS_H - stripH / 2;
+  ctx.font = 'bold 18px Georgia';
+  ctx.textBaseline = 'middle';
 
+  // Level label — left.
   ctx.fillStyle = '#b3a98e';
-  ctx.font = 'bold 16px Georgia';
   ctx.textAlign = 'left';
   const labelL = 'УРОВЕНЬ ' + state.level + (state.levelName ? '  ·  ' + state.levelName.toUpperCase() : '');
-  ctx.fillText(labelL, 30, CANVAS_H - 56);
+  ctx.fillText(labelL, 30, cy);
+  const labelW = ctx.measureText(labelL).width;
 
+  // Counter — right (same font as level).
+  const guessed = totalGuessedWordCount();
+  const unlocked = totalUnlockedWordCount();
+  const counterText = guessed + ' / ' + unlocked + ' слов';
   ctx.fillStyle = '#7b9c6e';
-  ctx.font = 'bold 16px Georgia';
   ctx.textAlign = 'right';
-  ctx.fillText(state.wordsThisLevel + ' / ' + state.wordsToWin + ' слов', CANVAS_W - 30, CANVAS_H - 56);
+  ctx.fillText(counterText, CANVAS_W - 30, cy);
+  const ctw = ctx.measureText(counterText).width;
+  COUNTER_RECT.x = CANVAS_W - 30 - ctw - 8;
+  COUNTER_RECT.y = cy - 16;
+  COUNTER_RECT.w = ctw + 16;
+  COUNTER_RECT.h = 32;
 
-  // Progress bar
-  const bw = 240, bh = 6;
-  const bx = (CANVAS_W - bw) / 2, by = CANVAS_H - 28;
+  // Progress bar — fills the gap between level label and counter.
+  const padGap = 24;
+  const bx = 30 + labelW + padGap;
+  const bxEnd = CANVAS_W - 30 - ctw - padGap;
+  const bw = Math.max(60, bxEnd - bx);
+  const bh = 14;
+  const by = cy - bh / 2;
   ctx.fillStyle = '#2c3142';
-  ctx.fillRect(bx, by, bw, bh);
-  const f = Math.max(0, Math.min(1, state.wordsThisLevel / state.wordsToWin));
+  drawRoundedRect(bx, by, bw, bh, 7);
+  ctx.fill();
+  const f = unlocked > 0 ? Math.max(0, Math.min(1, guessed / unlocked)) : 0;
   ctx.fillStyle = '#7b9c6e';
-  ctx.fillRect(bx, by, bw * f, bh);
+  drawRoundedRect(bx, by, Math.max(bh, bw * f), bh, 7);
+  ctx.fill();
+  ctx.strokeStyle = '#3a3f4f';
+  ctx.lineWidth = 1;
+  drawRoundedRect(bx + 0.5, by + 0.5, bw - 1, bh - 1, 7);
+  ctx.stroke();
+  ctx.textBaseline = 'alphabetic';
+}
+
+// Snapshot of every word in the unlocked pool right now. Recomputed on every
+// call — never cached — so changes to kys.js or switchLevel rewinds are
+// reflected immediately in the counter.
+function unlockedWordSet() {
+  const pool = new Set();
+  if (!levelData || !state) return pool;
+  const upTo = Math.min(state.level, levelData.length);
+  for (let i = 1; i <= upTo; i++) {
+    for (const w of pickLevelSource(i).words) pool.add(w);
+  }
+  return pool;
+}
+function totalUnlockedWordCount() { return unlockedWordSet().size; }
+// Only count guessed words that actually belong to the current unlocked pool.
+// This shields the counter from stale `foundLevelWords` entries left over
+// from earlier game versions (e.g. before lemmatisation).
+function totalGuessedWordCount() {
+  if (!state || !state.foundLevelWords) return 0;
+  const pool = unlockedWordSet();
+  let n = 0;
+  for (const w of state.foundLevelWords) if (pool.has(w)) n++;
+  return n;
+}
+function pointInCounter(x, y) {
+  return state && !state.gameOver &&
+    x >= COUNTER_RECT.x && x <= COUNTER_RECT.x + COUNTER_RECT.w &&
+    y >= COUNTER_RECT.y && y <= COUNTER_RECT.y + COUNTER_RECT.h;
 }
 
 function drawBursts() {
@@ -1337,10 +1443,7 @@ function onBubbleClick(b) {
   if (concat.length < 4) return;
   if (dictionary.has(concat) && !state.foundLevelWords.has(concat)) {
     state.selection = [];
-    burnWord({ bubbles, word: concat }, true);
-  } else if (broaderDict.has(concat) && !state.foundOtherWords.has(concat)) {
-    state.selection = [];
-    burnWord({ bubbles, word: concat }, false);
+    burnWord({ bubbles, word: concat });
   }
 }
 
@@ -1372,6 +1475,11 @@ function setupInput() {
     }
     if (pointInHint(x, y)) {
       triggerHint();
+      e.preventDefault();
+      return;
+    }
+    if (pointInCounter(x, y)) {
+      showWordsList();
       e.preventDefault();
       return;
     }
@@ -1508,22 +1616,6 @@ async function startGameWithPack(pack) {
 async function main() {
   canvas = document.getElementById('game');
   ctx = canvas.getContext('2d');
-  loadScores();
-  document.getElementById('highscores').innerHTML = renderScoresHtml();
-  // Optional broader Cyrillic dictionary — words.txt is canonical, dict.txt is
-  // accepted as a fallback. Combos that match this set but NOT the level's
-  // word list still burn (in a different colour) but don't advance the level.
-  const broaderText = (await loadFile('words.txt')) || (await loadFile('dict.txt'));
-  if (broaderText) {
-    broaderDict = new Set();
-    for (const line of broaderText.split(/\r?\n/)) {
-      const w = line.trim().toLowerCase();
-      if (!w || w.length < 4) continue;
-      if (!/^[а-яё]+$/i.test(w)) continue;
-      broaderDict.add(w);
-    }
-    console.log('broader dict loaded:', broaderDict.size, 'words');
-  }
   setupInput();
   renderLevelChooser();
   document.getElementById('restart').addEventListener('click', () => {
@@ -1532,6 +1624,9 @@ async function main() {
   });
   document.getElementById('levelPickerClose').addEventListener('click', () => {
     document.getElementById('levelPicker').classList.add('hidden');
+  });
+  document.getElementById('wordsListClose').addEventListener('click', () => {
+    document.getElementById('wordsList').classList.add('hidden');
   });
 }
 
