@@ -341,6 +341,31 @@ function rebuildPool() {
   const active = activeWords();
   dictionary = buildDictionaryFromWords(active);
   syllables = buildSyllablesFromWords(active);
+  pruneStaleBubbles();
+}
+
+// Remove any on-screen bubble whose syllable string is no longer part of the
+// active pool's inventory — e.g. ABCDEF was found via ABCD + EF, leaving the
+// ABC and DEF bubbles "stale" because no remaining word's split needs them.
+// They animate out the same way burned bubbles do.
+function pruneStaleBubbles() {
+  if (!state || !state.bubbles || !state.bubbles.length) return;
+  if (!syllables || !syllables.counts) return;
+  const valid = syllables.counts;
+  const stale = state.bubbles.filter(b => !valid.has(b.syllable));
+  if (!stale.length) return;
+  const ids = new Set(stale.map(b => b.id));
+  for (const b of stale) {
+    state.bursts.push({
+      x: b.x, y: b.y, w: b.w,
+      syllable: b.syllable,
+      t: 0, dur: 0.7,
+    });
+  }
+  state.bubbles = state.bubbles.filter(b => !ids.has(b.id));
+  if (state.selection) state.selection = state.selection.filter(id => !ids.has(id));
+  if (state.hintBubbleIds) state.hintBubbleIds = state.hintBubbleIds.filter(id => !ids.has(id));
+  if (state.draggedId !== null && ids.has(state.draggedId)) state.draggedId = null;
 }
 
 // How many of the CURRENT level's words have been guessed (across this run)?
