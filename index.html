@@ -217,6 +217,8 @@ let state = null;
 let dictionary = new Set();   // current level's valid words (rebuilt per level)
 let levelPack = null;         // selected pack: { name, file }
 let levelData = null;         // array of arrays of words (one inner array per level)
+// Dev mode (?dev=1 in the URL) unlocks every level for quick testing.
+const devMode = (typeof window !== 'undefined' && window.location && /(?:^|[?&])dev=1(?:&|$)/.test(window.location.search));
 let syllables = null;         // current level's syllable inventory (cumulative weights)
 let highScores = [];
 
@@ -244,25 +246,16 @@ function buildDictionaryFromWords(words) {
   return set;
 }
 
-// Split a word into either 2 or 3 contiguous pieces, each piece between
-// MIN_PART and MAX_PART letters. Returns null for words too short/long to
-// split under those bounds.
-const MIN_PART = 2, MAX_PART = 4;
+// Split a word into exactly 2 contiguous pieces, each at least MIN_PART
+// letters. No upper bound on piece length — "цивилизация" may split into
+// "ци" + "вилизация" or "циви" + "лизация", etc.
+const MIN_PART = 2;
 function splitWord(word) {
   const L = word.length;
-  if (L < 2 * MIN_PART || L > 3 * MAX_PART) return null;
+  if (L < 2 * MIN_PART) return null;
   const opts = [];
-  // 2-partitions
-  for (let p1 = MIN_PART; p1 <= Math.min(MAX_PART, L - MIN_PART); p1++) {
-    const p2 = L - p1;
-    if (p2 >= MIN_PART && p2 <= MAX_PART) opts.push([p1, p2]);
-  }
-  // 3-partitions
-  for (let p1 = MIN_PART; p1 <= MAX_PART; p1++) {
-    for (let p2 = MIN_PART; p2 <= MAX_PART; p2++) {
-      const p3 = L - p1 - p2;
-      if (p3 >= MIN_PART && p3 <= MAX_PART) opts.push([p1, p2, p3]);
-    }
+  for (let p1 = MIN_PART; p1 <= L - MIN_PART; p1++) {
+    opts.push([p1, L - p1]);
   }
   if (!opts.length) return null;
   const lens = opts[(Math.random() * opts.length) | 0];
@@ -270,6 +263,17 @@ function splitWord(word) {
   let i = 0;
   for (const len of lens) { out.push(word.substr(i, len)); i += len; }
   return out;
+}
+
+// Cache a 2-part split for every word in the current level.
+function preSplitLevelWords(words) {
+  if (!state.wordSplits) state.wordSplits = new Map();
+  for (const w of words) {
+    if (state.wordSplits.has(w)) continue;
+    const parts = splitWord(w);
+    if (!parts) continue;
+    state.wordSplits.set(w, parts.map(p => p.toUpperCase()));
+  }
 }
 
 // Build the level's syllable inventory by partitioning every unguessed pool
@@ -394,7 +398,7 @@ function pickLevelSource(level) {
   for (const w of raw) {
     if (typeof w !== 'string') continue;
     const lw = w.toLowerCase();
-    if (lw.length < 4 || lw.length > 3 * MAX_PART) continue;
+    if (lw.length < 4) continue;          // need ≥4 letters to make a 2-part split
     if (!/^[a-zа-яё]+$/i.test(lw)) continue;
     if (seen.has(lw)) continue;
     seen.add(lw);
@@ -486,13 +490,28 @@ function makeBubble(syllable, x, y) {
   return {
     id: state.nextBubbleId++,
     syllable: syllable.toUpperCase(),
+    nominalW: w, nominalH: CELL_H,
     w, h: CELL_H,
     x, y,
     vx: 0, vy: 0,
-    mass: w,            // wider parts displace slightly more
+    mass: w,
     spawnT: 0,
     spawnDur: 0.5,
   };
+}
+
+// Bubble-size scale: 1.0 up to 20 bubbles, then each doubling multiplies by
+// 0.75. Continuous so spawn-in churn doesn't snap.
+function applyBubbleScale() {
+  if (!state || !state.bubbles) return;
+  const n = state.bubbles.length;
+  const scale = n <= 20 ? 1 : Math.pow(0.75, Math.log2(n / 20));
+  state.bubbleScale = scale;
+  for (const b of state.bubbles) {
+    if (b.nominalW == null) { b.nominalW = b.w; b.nominalH = b.h; }
+    b.w = b.nominalW * scale;
+    b.h = b.nominalH * scale;
+  }
 }
 
 function bubbleAt(x, y) {
@@ -806,6 +825,10 @@ function installLevel(level, silent) {
   state.levelWords = src.words;
   state.wordsToWin = levelWinTarget(level);
   state.wordsThisLevel = currentLevelGuessedCount();
+  // Pre-pick splits for the current level so that ≥ half its words are
+  // 2-part. Uncached earlier-level words still fall back to a random split
+  // inside buildSyllablesFromWords.
+  preSplitLevelWords(src.words);
   // Pool = unguessed words from levels 1..N. Rebuilt every match too.
   rebuildPool();
   // Save guessed-word progress every time a new level is reached.
@@ -853,6 +876,7 @@ function update(dt) {
       state.draggedId = null;
     }
   }
+  applyBubbleScale();
   physicsStep(dt);
   if (state.hintTTL > 0) state.hintTTL = Math.max(0, state.hintTTL - dt);
   if (state.hintCooldown > 0) state.hintCooldown = Math.max(0, state.hintCooldown - dt);
@@ -1118,11 +1142,13 @@ function showLevelPicker() {
   const list = document.getElementById('levelPickerList');
   list.innerHTML = '';
   const prog = getPackProgress(levelPack);
+  // ?dev=1 unlocks every level for testing.
+  const unlockedTo = devMode ? levelData.length : prog.unlocked;
   for (let i = 1; i <= levelData.length; i++) {
     const btn = document.createElement('button');
     const name = levelNameAt(i);
     btn.textContent = name ? (i + ' · ' + name) : ('Уровень ' + i);
-    if (i > prog.unlocked) {
+    if (i > unlockedTo) {
       btn.classList.add('locked');
       btn.disabled = true;
     } else {
@@ -1233,7 +1259,7 @@ function drawSyllableBox(x, y, w, h, syllable) {
   ctx.lineWidth = 1.2;
   ctx.stroke();
   ctx.fillStyle = '#1c1f2a';
-  const fontPx = Math.round(bh * 0.62);
+  const fontPx = Math.max(8, Math.round(bh * 0.62));
   ctx.font = 'bold ' + fontPx + 'px Georgia';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
@@ -1260,7 +1286,7 @@ function drawSyllableBoxInverted(x, y, w, h, syllable, bgColor, fgColor) {
   ctx.stroke();
   // text
   ctx.fillStyle = fgColor;
-  const fontPx = Math.round(bh * 0.62);
+  const fontPx = Math.max(8, Math.round(bh * 0.62));
   ctx.font = 'bold ' + fontPx + 'px Georgia';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
