@@ -653,7 +653,7 @@ function burnWord(match, isLevel) {
     x: CENTER_X, y: CENTER_Y,
     text: match.word.toUpperCase() + '   +' + Math.round(gain),
     color: isLevel ? '#9bbf86' : '#b58cc7',
-    t: 0, dur: 1.5, isText: true,
+    t: 0, dur: 2.6, isText: true, slide: true,
   });
   // Pool shrinks: rebuild dictionary + syllable inventory excluding this word.
   if (isLevel) rebuildPool();
@@ -1203,19 +1203,26 @@ function drawBursts() {
         ctx.fillText(b.text, b.x, b.y);
         ctx.textBaseline = 'alphabetic';
       } else {
-        const baseColor = b.color || 'rgba(212, 180, 131,' + a + ')';
-        // If a fixed color was supplied, splice the alpha onto it.
+        // Word-find slide: hold full opacity until the last 0.6s, then fade.
+        // Vertical motion eases out — fast at first, slowing as it floats up.
+        const fadeStart = Math.max(0, b.dur - 0.6);
+        const alphaSlide = b.t < fadeStart
+          ? 1
+          : Math.max(0, 1 - (b.t - fadeStart) / 0.6);
+        // Ease-out on travel: y(t) = -DIST * (1 - (1 - t/dur)^2)
+        const p = b.t / b.dur;
+        const ease = 1 - (1 - p) * (1 - p);
+        const dy = b.slide ? 280 * ease : b.t * 36;
         if (b.color) {
-          // accept hex like #b58cc7 → rgba(...)
           const num = parseInt(b.color.replace('#',''), 16);
           const r = (num >> 16) & 0xff, g = (num >> 8) & 0xff, bl = num & 0xff;
-          ctx.fillStyle = `rgba(${r},${g},${bl},${a})`;
+          ctx.fillStyle = `rgba(${r},${g},${bl},${alphaSlide})`;
         } else {
-          ctx.fillStyle = baseColor;
+          ctx.fillStyle = `rgba(212, 180, 131, ${alphaSlide})`;
         }
         ctx.font = 'bold 22px Georgia';
         ctx.textAlign = 'center';
-        ctx.fillText(b.text, b.x, b.y - b.t * 36);
+        ctx.fillText(b.text, b.x, b.y - dy);
       }
     } else {
       const p = b.t / b.dur;
