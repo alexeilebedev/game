@@ -104,7 +104,7 @@
     <p class="byline">по роману Татьяны Толстой «Кысь»</p>
     <div class="intro">
       <p><strong>Об игре.</strong> Слова взяты из книги и появляются в порядке возрастания сложности. Уровни названы в честь глав романа.</p>
-      <p><strong>Как играть.</strong> Кликайте по слогам, чтобы складывать слова. Найдите половину слов уровня, чтобы открыть следующий.</p>
+      <p><strong>Как играть.</strong> Кликайте по слогам, чтобы складывать слова. Найдите больше половины слов уровня и расчистите тучу — тогда откроется следующий уровень.</p>
       <p><strong>Очки.</strong> Любое русское слово принимается и приносит очки, но только слова из книги приближают к следующему уровню.</p>
       <p><strong>Если застряли.</strong> Нажмите <strong>ПРОБЕЛ</strong> — упадут ещё пять слогов. Кнопка <strong>ПОДСКАЗКА</strong> подсветит готовое слово (раз в полторы минуты).</p>
     </div>
@@ -273,8 +273,9 @@ function levelNameAt(level) {
   return e.name || '';
 }
 function levelWordCount(level) { return levelWordsAt(level).length; }
-// Half (rounded up) of the level's words advances the player.
-function levelWinTarget(level) { return Math.max(1, Math.ceil(levelWordCount(level) / 2)); }
+// More than half of the level's words advances the player. floor(n/2)+1
+// satisfies the strict ">50%" rule (e.g. n=4 → 3, n=10 → 6, n=11 → 6).
+function levelWinTarget(level) { return Math.max(1, Math.floor(levelWordCount(level) / 2) + 1); }
 
 // All distinct, sanitised words across levels 1..upTo (inclusive).
 function poolWordsUpTo(upTo) {
@@ -634,8 +635,10 @@ function burnWord(match, isLevel) {
   const letters = match.word.length;
   const gain = scoreFor(letters, 1) * (isLevel ? 1 : 0.5);
   state.score += Math.round(gain);
-  state.wordsLog.push(match.word.toUpperCase());
+  // Only secret-set (level-pool) words get logged in the running ticker;
+  // off-pool Cyrillic words still get the toast but stay out of the tape.
   if (isLevel) {
+    state.wordsLog.push(match.word.toUpperCase());
     state.foundLevelWords.add(match.word);
   } else {
     state.foundOtherWords.add(match.word);
@@ -659,9 +662,15 @@ function burnWord(match, isLevel) {
   if (isLevel) rebuildPool();
   // Recount progress against the CURRENT level only.
   state.wordsThisLevel = currentLevelGuessedCount();
-  // Each find drops up to 5 new syllables.
-  dropSyllables(5);
-  if (state.wordsThisLevel >= state.wordsToWin) levelUp();
+  // After a burn, drop 5 new syllables — but only 2 if the cloud is already
+  // dense (≥ 20 letters on screen) to avoid runaway clutter.
+  let lettersOnScreen = 0;
+  for (const b of state.bubbles) lettersOnScreen += b.syllable.length;
+  dropSyllables(lettersOnScreen >= 20 ? 2 : 5);
+  // Advance only when MORE than half the level's words are guessed AND the
+  // cloud has shrunk below 20 syllables, so the player can't bypass a
+  // packed cloud or skip with a bare-minimum half.
+  if (state.wordsThisLevel >= state.wordsToWin && state.bubbles.length < 20) levelUp();
 }
 
 function spawnNewBubble() {
@@ -830,39 +839,25 @@ function render() {
     }
   }
 
-  // Click-to-spell selection halos (gold)
-  if (state.selection && state.selection.length) {
-    ctx.lineWidth = 3.5;
-    ctx.strokeStyle = 'rgba(212, 180, 131, 0.92)';
-    for (const id of state.selection) {
-      const b = state.bubbles.find(x => x.id === id);
-      if (!b) continue;
-      drawRoundedRect(b.x - b.w / 2 - 4, b.y - b.h / 2 - 4, b.w + 8, b.h + 8, 12);
-      ctx.stroke();
-    }
-  }
-
-  // Hint halos (cyan), pulsing while the hint is active.
-  if (state.hintTTL > 0 && state.hintBubbleIds && state.hintBubbleIds.length) {
-    const fade = Math.min(1, state.hintTTL / 1.0);
-    const pulse = 0.55 + 0.35 * Math.sin(performance.now() / 180);
-    ctx.lineWidth = 5;
-    ctx.strokeStyle = `rgba(110, 200, 220, ${(fade * pulse).toFixed(3)})`;
-    for (const id of state.hintBubbleIds) {
-      const b = state.bubbles.find(x => x.id === id);
-      if (!b) continue;
-      drawRoundedRect(b.x - b.w / 2 - 7, b.y - b.h / 2 - 7, b.w + 14, b.h + 14, 14);
-      ctx.stroke();
-    }
-  }
-
-  // Bubbles
+  // Bubbles (drawn first; selection/hint inversions overdraw on top so they
+  // can never be hidden by an overlapping neighbour).
+  const selSet = new Set(state.selection || []);
+  const hintSet = (state.hintTTL > 0 && state.hintBubbleIds)
+    ? new Set(state.hintBubbleIds) : new Set();
   for (const b of state.bubbles) {
     let alpha = 1;
     if (b.spawnT < b.spawnDur) alpha = b.spawnT / b.spawnDur;
     if (alpha < 1) ctx.globalAlpha = alpha;
-    drawSyllableBox(b.x - b.w / 2, b.y - b.h / 2, b.w, b.h, b.syllable);
-    if (alpha < 1) ctx.globalAlpha = 1;
+    if (hintSet.has(b.id)) {
+      const fade = Math.min(1, state.hintTTL / 1.0);
+      ctx.globalAlpha = (alpha < 1 ? alpha : 1) * fade;
+      drawSyllableBoxInverted(b.x - b.w / 2, b.y - b.h / 2, b.w, b.h, b.syllable, '#16323d', '#9bd5e0');
+    } else if (selSet.has(b.id)) {
+      drawSyllableBoxInverted(b.x - b.w / 2, b.y - b.h / 2, b.w, b.h, b.syllable, '#3a2f1a', '#d4b483');
+    } else {
+      drawSyllableBox(b.x - b.w / 2, b.y - b.h / 2, b.w, b.h, b.syllable);
+    }
+    if (alpha < 1 || hintSet.has(b.id)) ctx.globalAlpha = 1;
   }
 
   drawCurrentSpell();
@@ -952,18 +947,36 @@ function hintAvailable() {
   return !!(state && !state.gameOver && (state.hintCooldown || 0) <= 0);
 }
 
-// Walk the active pool's split map, looking for a word whose every part is
-// already on screen. Returns { word, bubbles } or null.
+// Find a word whose every split part is currently on screen. If the player
+// has clicked some syllables (`state.selection`), the hint is biased to a
+// word whose split CONTAINS those selected syllables (multiset-wise) — so it
+// answers "what can I make starting with what I've already picked?".
+// Returns { word, bubbles } or null.
 function findHint() {
   if (!syllables || !syllables.splits) return null;
-  // Group on-screen bubbles by their syllable string. (No two should share,
-  // but for safety we still keep an array per key.)
-  const onScreen = new Map();
-  for (const b of state.bubbles) {
-    const arr = onScreen.get(b.syllable) || [];
-    arr.push(b);
-    onScreen.set(b.syllable, arr);
+
+  // Selected bubbles in click order, plus a multiset of their syllable strings.
+  const selBubbles = [];
+  for (const id of (state.selection || [])) {
+    const b = state.bubbles.find(x => x.id === id);
+    if (b) selBubbles.push(b);
   }
+  const selCount = new Map();
+  for (const b of selBubbles) {
+    selCount.set(b.syllable, (selCount.get(b.syllable) || 0) + 1);
+  }
+  const selIds = new Set(selBubbles.map(b => b.id));
+
+  // On-screen bubbles excluding the ones already selected — those are the
+  // pool the hint can pull additional pieces from.
+  const free = new Map();
+  for (const b of state.bubbles) {
+    if (selIds.has(b.id)) continue;
+    const arr = free.get(b.syllable) || [];
+    arr.push(b);
+    free.set(b.syllable, arr);
+  }
+
   // Iterate splits in random order so repeated hints don't always show the
   // same word.
   const entries = [...syllables.splits.entries()];
@@ -971,18 +984,37 @@ function findHint() {
     const j = (Math.random() * (i + 1)) | 0;
     [entries[i], entries[j]] = [entries[j], entries[i]];
   }
+
   for (const [word, parts] of entries) {
     if (state.foundLevelWords && state.foundLevelWords.has(word)) continue;
-    const used = new Map(); // copy of onScreen we mutate
-    onScreen.forEach((arr, k) => used.set(k, arr.slice()));
-    const bubbles = [];
-    let ok = true;
-    for (const p of parts) {
-      const arr = used.get(p);
-      if (!arr || !arr.length) { ok = false; break; }
-      bubbles.push(arr.shift());
+
+    // Multiset count of the word's required parts.
+    const partCount = new Map();
+    for (const p of parts) partCount.set(p, (partCount.get(p) || 0) + 1);
+
+    // Skip if selection isn't a subset of this word's parts.
+    let okSel = true;
+    for (const [syl, c] of selCount) {
+      if ((partCount.get(syl) || 0) < c) { okSel = false; break; }
     }
-    if (ok) return { word, bubbles };
+    if (!okSel) continue;
+
+    // Whatever remains after using the selection — must be available among
+    // the free (un-selected) on-screen bubbles.
+    const freeCopy = new Map();
+    free.forEach((arr, k) => freeCopy.set(k, arr.slice()));
+    const extras = [];
+    let ok = true;
+    for (const [syl, c] of partCount) {
+      const need = c - (selCount.get(syl) || 0);
+      if (need <= 0) continue;
+      const arr = freeCopy.get(syl) || [];
+      if (arr.length < need) { ok = false; break; }
+      for (let k = 0; k < need; k++) extras.push(arr[k]);
+    }
+    if (!ok) continue;
+
+    return { word, bubbles: [...selBubbles, ...extras] };
   }
   return null;
 }
@@ -1116,6 +1148,33 @@ function drawSyllableBox(x, y, w, h, syllable) {
   ctx.fillText(syllable, bx + bw / 2, by + bh / 2 + 1);
 }
 
+// Inverted bubble: dark accented background, light text. Used to mark
+// selection (gold tones) or active hint (cyan tones) without relying on
+// outer halos that get hidden by overlapping neighbours.
+function drawSyllableBoxInverted(x, y, w, h, syllable, bgColor, fgColor) {
+  const pad = 2;
+  const bx = x + pad, by = y + pad, bw = w - pad * 2, bh = h - pad * 2;
+  const radius = 9;
+  // shadow
+  drawRoundedRect(bx + 1, by + 2, bw, bh, radius);
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.fill();
+  // body
+  drawRoundedRect(bx, by, bw, bh, radius);
+  ctx.fillStyle = bgColor;
+  ctx.fill();
+  ctx.strokeStyle = fgColor;
+  ctx.lineWidth = 1.6;
+  ctx.stroke();
+  // text
+  ctx.fillStyle = fgColor;
+  const fontPx = Math.round(bh * 0.62);
+  ctx.font = 'bold ' + fontPx + 'px Georgia';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(syllable, bx + bw / 2, by + bh / 2 + 1);
+}
+
 function drawWordsLine() {
   if (!state.wordsLog || !state.wordsLog.length) return;
   const y = CANVAS_H - 110;
@@ -1183,16 +1242,24 @@ function drawBursts() {
         // Hold full opacity for most of the duration, fade only at the end.
         const fade = 0.6;
         const alpha = b.t < b.dur - fade ? 1 : Math.max(0, (b.dur - b.t) / fade);
-        ctx.font = 'bold 64px Georgia';
+        // Auto-shrink the font so the banner (with padding) always fits on
+        // the canvas. Measure at the nominal size, then scale down if needed.
+        const padX = 36, padY = 22;
+        const maxBoxW = CANVAS_W - 40;          // 20-px margin on each side
+        let fontPx = 64;
+        ctx.font = 'bold ' + fontPx + 'px Georgia';
+        let tw = ctx.measureText(b.text).width;
+        if (tw + padX * 2 > maxBoxW) {
+          fontPx = Math.max(20, Math.floor(fontPx * (maxBoxW - padX * 2) / tw));
+          ctx.font = 'bold ' + fontPx + 'px Georgia';
+          tw = ctx.measureText(b.text).width;
+        }
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        const tw = ctx.measureText(b.text).width;
-        const padX = 36, padY = 22;
-        const bw = tw + padX * 2;
-        const bh = 64 + padY * 2;
+        const bw = Math.min(maxBoxW, tw + padX * 2);
+        const bh = fontPx + padY * 2;
         const bx = b.x - bw / 2;
         const by = b.y - bh / 2;
-        // Solid backdrop so the banner sits clearly above the cloud below it.
         ctx.fillStyle = 'rgba(20, 22, 30,' + (alpha * 0.94) + ')';
         drawRoundedRect(bx, by, bw, bh, 14);
         ctx.fill();
