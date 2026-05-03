@@ -276,15 +276,25 @@ function splitWord(word) {
 // word into 2 or 3 parts. The result is a multiset: a syllable that appears
 // twice in a single split (e.g. "ба" + "ба" for "баба") gets count 2, and
 // the screen may carry up to that many concurrent copies.
+//
+// IMPORTANT: each word's split is decided ONCE per session and cached on
+// state.wordSplits. Otherwise every rebuildPool() would re-randomise the
+// split, and bubbles whose syllable came from the previous split would look
+// "stale" even though the word that created them is still unguessed.
 function buildSyllablesFromWords(words) {
   const counts = new Map();   // UPPERCASE syllable → total occurrences
   const splits = new Map();   // lowercase word → array of UPPERCASE parts
+  if (!state.wordSplits) state.wordSplits = new Map();
   for (const raw of words) {
     const w = (raw || '').toLowerCase();
     if (!/^[a-zа-яё]+$/i.test(w)) continue;
-    const parts = splitWord(w);
-    if (!parts) continue;
-    const upper = parts.map(p => p.toUpperCase());
+    let upper = state.wordSplits.get(w);
+    if (!upper) {
+      const parts = splitWord(w);
+      if (!parts) continue;
+      upper = parts.map(p => p.toUpperCase());
+      state.wordSplits.set(w, upper);
+    }
     splits.set(w, upper);
     for (const p of upper) counts.set(p, (counts.get(p) || 0) + 1);
   }
@@ -764,6 +774,7 @@ function initState(startLevel, saved) {
     wordsThisLevel: 0,
     wordsToWin: levelWinTarget(startLevel),
     foundLevelWords: new Set(restoredLevel),
+    wordSplits: new Map(),    // session-stable per-word split cache
     selection: [],
     dragMoved: false,
     dragStart: null,
