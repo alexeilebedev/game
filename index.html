@@ -106,7 +106,7 @@
       <p><strong>Об игре.</strong> Слова взяты из книги и появляются в порядке возрастания сложности. Уровни названы в честь глав романа.</p>
       <p><strong>Как играть.</strong> Кликайте по слогам, чтобы складывать слова. Найдите половину слов уровня, чтобы открыть следующий.</p>
       <p><strong>Очки.</strong> Любое русское слово принимается и приносит очки, но только слова из книги приближают к следующему уровню.</p>
-      <p><strong>Если застряли.</strong> Нажмите <strong>ПРОБЕЛ</strong> — упадут ещё пять слогов. Кнопка <strong>ПОДСКАЗКА</strong> подсветит готовое слово (раз в три минуты).</p>
+      <p><strong>Если застряли.</strong> Нажмите <strong>ПРОБЕЛ</strong> — упадут ещё пять слогов. Кнопка <strong>ПОДСКАЗКА</strong> подсветит готовое слово (раз в полторы минуты).</p>
     </div>
     <div id="levelChooser" class="level-list"></div>
     <div class="scores" id="highscores"></div>
@@ -146,7 +146,7 @@ const COLLISION_ITERS = 6;     // positional-correction passes per frame
 const EXIT_RECT   = { x: 14,  y: 14, w: 86,  h: 34 };
 const LEVELS_RECT = { x: 110, y: 14, w: 110, h: 34 };
 const HINT_RECT   = { x: 260, y: 14, w: 110, h: 34 };
-const HINT_COOLDOWN = 180; // seconds between hint uses
+const HINT_COOLDOWN = 90;  // seconds between hint uses (1:30)
 const HINT_TTL      = 5;   // seconds the hint halo stays visible
 
 const PALETTE = [
