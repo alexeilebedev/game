@@ -283,22 +283,33 @@ function buildDictionaryFromWords(words) {
 }
 
 // Split a word into exactly 2 contiguous pieces, each at least MIN_PART
-// letters. No upper bound on piece length — "цивилизация" may split into
-// "ци" + "вилизация" or "циви" + "лизация", etc.
+// letters. The cut point is biased toward the middle via a Gaussian weight,
+// so a long word like "цивилизация" tends to split as "цивил" + "изация"
+// rather than "ци" + "вилизация".
 const MIN_PART = 2;
 function splitWord(word) {
   const L = word.length;
   if (L < 2 * MIN_PART) return null;
-  const opts = [];
+  const candidates = [];          // p1 values
+  const weights = [];
+  const centre = L / 2;
+  const sigma = Math.max(1, L / 5);
+  let total = 0;
   for (let p1 = MIN_PART; p1 <= L - MIN_PART; p1++) {
-    opts.push([p1, L - p1]);
+    const d = p1 - centre;
+    const w = Math.exp(-(d * d) / (2 * sigma * sigma));
+    candidates.push(p1);
+    weights.push(w);
+    total += w;
   }
-  if (!opts.length) return null;
-  const lens = opts[(Math.random() * opts.length) | 0];
-  const out = [];
-  let i = 0;
-  for (const len of lens) { out.push(word.substr(i, len)); i += len; }
-  return out;
+  if (!candidates.length) return null;
+  let r = Math.random() * total;
+  let pick = candidates[0];
+  for (let i = 0; i < candidates.length; i++) {
+    r -= weights[i];
+    if (r <= 0) { pick = candidates[i]; break; }
+  }
+  return [word.substr(0, pick), word.substr(pick)];
 }
 
 // Cache a 2-part split for every word in the current level.
