@@ -176,13 +176,49 @@ const GRAVITY = 1560;         // px/s² toward centre at the cloud edge
 const DAMPING = 0.86;          // velocity multiplier per 60-Hz frame-equivalent
 const TOUCH_TOL = 4;           // bubbles within this many pixels are "touching"
 const COLLISION_ITERS = 6;     // positional-correction passes per frame
-const EXIT_RECT    = { x: 14,  y: 14, w: 86,  h: 34 };
-const LEVELS_RECT  = { x: 110, y: 14, w: 110, h: 34 };
-// HUD-area click target for the global word counter — populated each frame
-// in drawHUD() because its width depends on the rendered text.
+// Button rectangles are recomputed by recomputeButtonLayout() so they can
+// scale up on small viewports for tap-friendly targets.
+const EXIT_RECT    = { x: 0, y: 0, w: 0, h: 0 };
+const LEVELS_RECT  = { x: 0, y: 0, w: 0, h: 0 };
+const HINT_RECT    = { x: 0, y: 0, w: 0, h: 0 };
+const MORE_RECT    = { x: 0, y: 0, w: 0, h: 0 };
 const COUNTER_RECT = { x: 0, y: 0, w: 0, h: 0 };
-const HINT_RECT   = { x: 260, y: 14, w: 110, h: 34 };
+let uiScale = 1.0;
 const HINT_COOLDOWN = 90;  // seconds between hint uses (1:30)
+
+// Decide how big buttons / fonts should be relative to the canvas's internal
+// coordinate system. On big desktop displays the canvas renders 1:1 so 1.0
+// is fine; on phones the canvas is shrunk by CSS to fit the viewport, so
+// we scale internal sizes up to keep tap targets ≥ ~44 display pixels.
+function updateUiScale() {
+  const vw = (typeof window !== 'undefined' && window.innerWidth) || CANVAS_W;
+  const vh = (typeof window !== 'undefined' && window.innerHeight) || CANVAS_H;
+  const displayW = Math.min(vw - 16, (vh - 16) * CANVAS_W / CANVAS_H);
+  const displayScale = displayW / CANVAS_W;
+  uiScale = Math.max(1, Math.min(2.2, 0.55 / Math.max(0.001, displayScale)));
+  recomputeButtonLayout();
+}
+
+function recomputeButtonLayout() {
+  const h = Math.round(36 * uiScale);
+  const y = Math.round(14 * uiScale);
+  const x0 = Math.round(14 * uiScale);
+  const gap = Math.round(10 * uiScale);
+  const exitW = Math.round(96 * uiScale);
+  EXIT_RECT.x = x0; EXIT_RECT.y = y; EXIT_RECT.w = exitW; EXIT_RECT.h = h;
+  const levelsW = Math.round(120 * uiScale);
+  LEVELS_RECT.x = EXIT_RECT.x + EXIT_RECT.w + gap;
+  LEVELS_RECT.y = y; LEVELS_RECT.w = levelsW; LEVELS_RECT.h = h;
+  const hintW = Math.round(140 * uiScale);
+  HINT_RECT.x = LEVELS_RECT.x + LEVELS_RECT.w + Math.round(20 * uiScale);
+  HINT_RECT.y = y; HINT_RECT.w = hintW; HINT_RECT.h = h;
+  const moreW = Math.round(96 * uiScale);
+  MORE_RECT.x = CANVAS_W - moreW - x0;
+  MORE_RECT.y = y; MORE_RECT.w = moreW; MORE_RECT.h = h;
+}
+
+if (typeof window !== 'undefined') window.addEventListener('resize', updateUiScale);
+updateUiScale();
 const HINT_TTL      = 5;   // seconds the hint halo stays visible
 
 const PALETTE = [
@@ -946,6 +982,7 @@ function render() {
   drawExitButton();
   drawLevelsButton();
   drawHintButton();
+  drawMoreButton();
   drawBursts();
 }
 
@@ -965,15 +1002,17 @@ function drawCurrentSpell() {
   ctx.textBaseline = 'alphabetic';
 }
 
-function drawTopButton(rect, label) {
-  ctx.fillStyle = 'rgba(28, 31, 42, 0.92)';
+function drawTopButton(rect, label, opts) {
+  opts = opts || {};
+  const lit = opts.lit !== false;
+  ctx.fillStyle = lit ? 'rgba(28, 31, 42, 0.92)' : 'rgba(40, 42, 54, 0.78)';
   drawRoundedRect(rect.x, rect.y, rect.w, rect.h, 8);
   ctx.fill();
-  ctx.strokeStyle = '#5a6173';
+  ctx.strokeStyle = lit ? '#5a6173' : '#3a3f4f';
   ctx.lineWidth = 1.5;
   ctx.stroke();
-  ctx.fillStyle = '#d4b483';
-  ctx.font = 'bold 14px Georgia';
+  ctx.fillStyle = lit ? '#d4b483' : '#7d7868';
+  ctx.font = 'bold ' + Math.round(15 * uiScale) + 'px Georgia';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText(label, rect.x + rect.w / 2, rect.y + rect.h / 2);
@@ -985,32 +1024,22 @@ function drawLevelsButton() { drawTopButton(LEVELS_RECT, 'УРОВНИ'); }
 function drawHintButton() {
   if (!state || state.gameOver) return;
   const ready = hintAvailable();
-  const r = HINT_RECT;
-  ctx.fillStyle = ready ? 'rgba(28, 31, 42, 0.92)' : 'rgba(40, 42, 54, 0.78)';
-  drawRoundedRect(r.x, r.y, r.w, r.h, 8);
-  ctx.fill();
-  ctx.strokeStyle = ready ? '#5a6173' : '#3a3f4f';
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
-  // Label inside the button — single line, dimmed when on cooldown.
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillStyle = ready ? '#d4b483' : '#7d7868';
-  ctx.font = 'bold 14px Georgia';
-  ctx.fillText('ПОДСКАЗКА', r.x + r.w / 2, r.y + r.h / 2);
-  ctx.textBaseline = 'alphabetic';
-  // Countdown sits OUTSIDE the button, just to its right.
+  drawTopButton(HINT_RECT, 'ПОДСКАЗКА', { lit: ready });
   if (!ready) {
     const t = Math.ceil(state.hintCooldown);
     const mm = Math.floor(t / 60), ss = t % 60;
     const lbl = mm + ':' + (ss < 10 ? '0' : '') + ss;
     ctx.fillStyle = '#a59a78';
-    ctx.font = 'bold 14px Georgia';
+    ctx.font = 'bold ' + Math.round(15 * uiScale) + 'px Georgia';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    ctx.fillText(lbl, r.x + r.w + 10, r.y + r.h / 2);
+    ctx.fillText(lbl, HINT_RECT.x + HINT_RECT.w + Math.round(10 * uiScale), HINT_RECT.y + HINT_RECT.h / 2);
     ctx.textBaseline = 'alphabetic';
   }
+}
+function drawMoreButton() {
+  if (!state || state.gameOver) return;
+  drawTopButton(MORE_RECT, 'ЕЩЁ', { lit: syllablesAvailable() > 0 });
 }
 
 function pointInRect(rect, x, y) {
@@ -1018,13 +1047,21 @@ function pointInRect(rect, x, y) {
 }
 function pointInExit(x, y)   { return pointInRect(EXIT_RECT, x, y); }
 function pointInLevels(x, y) { return pointInRect(LEVELS_RECT, x, y); }
-// Click hits if the rect is touched at all — even on cooldown — so we can
-// flash a "wait" notice. The actual gating is in hintAvailable().
-function pointInHint(x, y) {
-  return state && !state.gameOver && pointInRect(HINT_RECT, x, y);
-}
+function pointInHint(x, y)   { return state && !state.gameOver && pointInRect(HINT_RECT, x, y); }
+function pointInMore(x, y)   { return state && !state.gameOver && pointInRect(MORE_RECT, x, y); }
 function hintAvailable() {
   return !!(state && !state.gameOver && (state.hintCooldown || 0) <= 0);
+}
+// Sum of pool capacity not yet on screen — drives the "ЕЩЁ" button's lit state.
+function syllablesAvailable() {
+  if (!syllables || !syllables.counts) return 0;
+  const onScreen = new Map();
+  if (state && state.bubbles) {
+    for (const b of state.bubbles) onScreen.set(b.syllable, (onScreen.get(b.syllable) || 0) + 1);
+  }
+  let total = 0;
+  for (const [syl, cnt] of syllables.counts) total += Math.max(0, cnt - (onScreen.get(syl) || 0));
+  return total;
 }
 
 // Find a word whose every split part is currently on screen. If the player
@@ -1295,7 +1332,8 @@ function drawSyllableBoxInverted(x, y, w, h, syllable, bgColor, fgColor) {
 
 function drawWordsLine() {
   if (!state.wordsLog || !state.wordsLog.length) return;
-  const y = CANVAS_H - 75;
+  const stripH = Math.round(50 * uiScale);
+  const y = CANVAS_H - stripH - 22;
   const padX = 30;
   const maxW = CANVAS_W - padX * 2;
   ctx.font = 'bold 22px Georgia';
@@ -1323,52 +1361,50 @@ function drawWordsLine() {
 }
 
 function drawHUD() {
-  // Slim 50-px strip; level / progress bar / counter on a single row.
-  const stripH = 50;
+  const stripH = Math.round(50 * uiScale);
   ctx.fillStyle = '#262b3a';
   ctx.fillRect(0, CANVAS_H - stripH, CANVAS_W, stripH);
 
   const cy = CANVAS_H - stripH / 2;
-  ctx.font = 'bold 18px Georgia';
+  const fontPx = Math.round(18 * uiScale);
+  ctx.font = 'bold ' + fontPx + 'px Georgia';
   ctx.textBaseline = 'middle';
 
-  // Level label — left.
   ctx.fillStyle = '#b3a98e';
   ctx.textAlign = 'left';
   const labelL = 'УРОВЕНЬ ' + state.level + (state.levelName ? '  ·  ' + state.levelName.toUpperCase() : '');
-  ctx.fillText(labelL, 30, cy);
+  const padX = Math.round(30 * uiScale);
+  ctx.fillText(labelL, padX, cy);
   const labelW = ctx.measureText(labelL).width;
 
-  // Counter — right (same font as level).
   const guessed = totalGuessedWordCount();
   const unlocked = totalUnlockedWordCount();
   const counterText = guessed + ' / ' + unlocked + ' слов';
   ctx.fillStyle = '#7b9c6e';
   ctx.textAlign = 'right';
-  ctx.fillText(counterText, CANVAS_W - 30, cy);
+  ctx.fillText(counterText, CANVAS_W - padX, cy);
   const ctw = ctx.measureText(counterText).width;
-  COUNTER_RECT.x = CANVAS_W - 30 - ctw - 8;
-  COUNTER_RECT.y = cy - 16;
+  COUNTER_RECT.x = CANVAS_W - padX - ctw - 8;
+  COUNTER_RECT.y = cy - fontPx;
   COUNTER_RECT.w = ctw + 16;
-  COUNTER_RECT.h = 32;
+  COUNTER_RECT.h = fontPx * 2;
 
-  // Progress bar — fills the gap between level label and counter.
-  const padGap = 24;
-  const bx = 30 + labelW + padGap;
-  const bxEnd = CANVAS_W - 30 - ctw - padGap;
+  const padGap = Math.round(24 * uiScale);
+  const bx = padX + labelW + padGap;
+  const bxEnd = CANVAS_W - padX - ctw - padGap;
   const bw = Math.max(60, bxEnd - bx);
-  const bh = 14;
+  const bh = Math.round(14 * uiScale);
   const by = cy - bh / 2;
   ctx.fillStyle = '#2c3142';
-  drawRoundedRect(bx, by, bw, bh, 7);
+  drawRoundedRect(bx, by, bw, bh, bh / 2);
   ctx.fill();
   const f = unlocked > 0 ? Math.max(0, Math.min(1, guessed / unlocked)) : 0;
   ctx.fillStyle = '#7b9c6e';
-  drawRoundedRect(bx, by, Math.max(bh, bw * f), bh, 7);
+  drawRoundedRect(bx, by, Math.max(bh, bw * f), bh, bh / 2);
   ctx.fill();
   ctx.strokeStyle = '#3a3f4f';
   ctx.lineWidth = 1;
-  drawRoundedRect(bx + 0.5, by + 0.5, bw - 1, bh - 1, 7);
+  drawRoundedRect(bx + 0.5, by + 0.5, bw - 1, bh - 1, bh / 2);
   ctx.stroke();
   ctx.textBaseline = 'alphabetic';
 }
@@ -1537,6 +1573,11 @@ function setupInput() {
     }
     if (pointInHint(x, y)) {
       triggerHint();
+      e.preventDefault();
+      return;
+    }
+    if (pointInMore(x, y)) {
+      if (syllablesAvailable() > 0) dropSyllables(5);
       e.preventDefault();
       return;
     }
