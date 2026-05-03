@@ -86,10 +86,10 @@
 
   <div id="menu" class="overlay">
     <h1>БУКИ ВЕДИ</h1>
-    <p>Кликайте по слогам, чтобы складывать слова. Найдите половину слов уровня, чтобы пройти дальше.</p>
+    <p>Кликайте по слогам, чтобы складывать слова. Найдите половину слов уровня, чтобы пройти дальше. Если на экране нечего собрать — нажмите ПРОБЕЛ, чтобы получить ещё пять слогов раньше срока.</p>
     <div id="levelChooser" class="level-list"></div>
     <div class="scores" id="highscores"></div>
-    <div class="controls">КЛИК — выбрать слог &nbsp;·&nbsp; ESC — сбросить &nbsp;·&nbsp; ПРОБЕЛ — пять новых слогов</div>
+    <div class="controls">КЛИК — выбрать слог &nbsp;·&nbsp; ESC — сбросить &nbsp;·&nbsp; ПРОБЕЛ — пять слогов раньше</div>
   </div>
 
   <div id="levelPicker" class="overlay hidden">
@@ -124,6 +124,9 @@ const TOUCH_TOL = 4;           // bubbles within this many pixels are "touching"
 const COLLISION_ITERS = 6;     // positional-correction passes per frame
 const EXIT_RECT   = { x: 14,  y: 14, w: 86,  h: 34 };
 const LEVELS_RECT = { x: 110, y: 14, w: 110, h: 34 };
+const HINT_RECT   = { x: 260, y: 14, w: 110, h: 34 };
+const HINT_COOLDOWN = 180; // seconds between hint uses
+const HINT_TTL      = 5;   // seconds the hint halo stays visible
 
 const PALETTE = [
   '#c47b6b', // burnt rose
@@ -213,11 +216,12 @@ function splitWord(word) {
   return out;
 }
 
-// Build the level's syllable inventory by splitting each theme word into
-// 2 or 3 parts. Returns the inventory PLUS a per-word split map so we can
-// later check whether a syllable is still needed by an unfound theme word.
+// Build the level's syllable inventory by partitioning every unguessed pool
+// word into 2 or 3 parts. The result is a multiset: a syllable that appears
+// twice in a single split (e.g. "ба" + "ба" for "баба") gets count 2, and
+// the screen may carry up to that many concurrent copies.
 function buildSyllablesFromWords(words) {
-  const counts = new Map();
+  const counts = new Map();   // UPPERCASE syllable → total occurrences
   const splits = new Map();   // lowercase word → array of UPPERCASE parts
   for (const raw of words) {
     const w = (raw || '').toLowerCase();
@@ -228,13 +232,7 @@ function buildSyllablesFromWords(words) {
     splits.set(w, upper);
     for (const p of upper) counts.set(p, (counts.get(p) || 0) + 1);
   }
-  const items = [];
-  let total = 0;
-  for (const [syl, cnt] of counts) {
-    total += cnt;
-    items.push({ syl, cum: total });
-  }
-  return { items, total, splits };
+  return { counts, splits };
 }
 
 // A level entry can be either an array of words OR an object {name, words}.
@@ -314,6 +312,7 @@ function pickLevelSource(level) {
 }
 
 // ---- Per-pack progress (saved in localStorage) ------------------------------
+// Stored shape: { unlocked, current, foundLevel: [...], foundOther: [...] }
 function packStorageKey(pack) { return 'pack.' + (pack && pack.file); }
 function getPackProgress(pack) {
   try {
@@ -321,15 +320,25 @@ function getPackProgress(pack) {
     if (raw) {
       const p = JSON.parse(raw);
       return {
-        unlocked: Math.max(1, p.unlocked | 0 || 1),
-        current:  Math.max(1, p.current  | 0 || 1),
+        unlocked:    Math.max(1, p.unlocked | 0 || 1),
+        current:     Math.max(1, p.current  | 0 || 1),
+        foundLevel:  Array.isArray(p.foundLevel)  ? p.foundLevel.slice()  : [],
+        foundOther:  Array.isArray(p.foundOther)  ? p.foundOther.slice()  : [],
       };
     }
   } catch (e) { /* ignore */ }
-  return { unlocked: 1, current: 1 };
+  return { unlocked: 1, current: 1, foundLevel: [], foundOther: [] };
 }
 function setPackProgress(pack, p) {
   try { localStorage.setItem(packStorageKey(pack), JSON.stringify(p)); } catch (e) {}
+}
+// Persist the in-memory found-words sets back into the saved progress blob.
+function persistFoundWords(pack) {
+  if (!pack || !state) return;
+  const p = getPackProgress(pack);
+  p.foundLevel = state.foundLevelWords ? [...state.foundLevelWords] : [];
+  p.foundOther = state.foundOtherWords ? [...state.foundOtherWords] : [];
+  setPackProgress(pack, p);
 }
 function markLevelStarted(pack, level) {
   const p = getPackProgress(pack);
@@ -345,34 +354,34 @@ function markLevelCleared(pack, level) {
   setPackProgress(pack, p);
 }
 
-// Pick a syllable for spawning. A syllable qualifies iff:
-//   1. It is in the active pool's syllable inventory (split parts of every
-//      unguessed word in levels 1..state.level).
-//   2. It is NOT currently on screen (no duplicates allowed).
-// Returns null if no syllable qualifies; spawnNewBubble() silently skips.
+// Pick a syllable for spawning. The pool inventory is a multiset (a syllable
+// that appears twice in a word's split — like "ба" + "ба" for "баба" — has
+// count 2). We may spawn another copy as long as on-screen copies are still
+// fewer than the inventory count. Sampling is weighted by remaining capacity.
 function nextSyllable() {
   const inv = syllables;
-  if (!inv || !inv.items.length) return null;
-  const onScreen = new Set();
+  if (!inv || !inv.counts || inv.counts.size === 0) return null;
+  const onScreen = new Map();
   if (state && state.bubbles) {
-    for (const b of state.bubbles) onScreen.add(b.syllable);
-  }
-  const ok = s => !onScreen.has(s);
-  // Weighted-random sampling.
-  for (let attempts = 0; attempts < 60; attempts++) {
-    const r = Math.random() * inv.total;
-    let lo = 0, hi = inv.items.length - 1;
-    while (lo < hi) {
-      const mid = (lo + hi) >>> 1;
-      if (inv.items[mid].cum <= r) lo = mid + 1;
-      else hi = mid;
+    for (const b of state.bubbles) {
+      onScreen.set(b.syllable, (onScreen.get(b.syllable) || 0) + 1);
     }
-    if (ok(inv.items[lo].syl)) return inv.items[lo].syl;
   }
-  // Deterministic backup if the random sampler kept rolling forbidden picks.
-  for (const it of inv.items) if (ok(it.syl)) return it.syl;
-  // No syllable qualifies — caller skips this spawn.
-  return null;
+  let total = 0;
+  const items = [];
+  for (const [syl, cnt] of inv.counts) {
+    const remaining = cnt - (onScreen.get(syl) || 0);
+    if (remaining <= 0) continue;
+    items.push({ syl, weight: remaining });
+    total += remaining;
+  }
+  if (total <= 0) return null;
+  let r = Math.random() * total;
+  for (const it of items) {
+    r -= it.weight;
+    if (r < 0) return it.syl;
+  }
+  return items[items.length - 1].syl;
 }
 
 // ---- Word-cloud helpers ----------------------------------------------------
@@ -652,8 +661,13 @@ function scoreFor(letters, combo) {
 }
 
 // ---- State init -------------------------------------------------------------
-function initState(startLevel) {
+// `saved` (optional) is a getPackProgress() blob; its foundLevel / foundOther
+// arrays are restored into the new state before installLevel() runs, so the
+// pool is built around already-guessed words and the per-level save sticks.
+function initState(startLevel, saved) {
   startLevel = Math.max(1, startLevel | 0 || 1);
+  const restoredLevel = (saved && Array.isArray(saved.foundLevel)) ? saved.foundLevel : [];
+  const restoredOther = (saved && Array.isArray(saved.foundOther)) ? saved.foundOther : [];
   state = {
     bubbles: [],
     nextBubbleId: 1,
@@ -670,15 +684,17 @@ function initState(startLevel) {
     levelWords: [],
     wordsThisLevel: 0,
     wordsToWin: levelWinTarget(startLevel),
-    foundLevelWords: new Set(),
-    foundOtherWords: new Set(),
+    foundLevelWords: new Set(restoredLevel),
+    foundOtherWords: new Set(restoredOther),
     selection: [],
     dragMoved: false,
     dragStart: null,
+    hintBubbleIds: [],
+    hintTTL: 0,
+    hintCooldown: 0,
   };
   installLevel(startLevel, true);
   if (levelPack) markLevelStarted(levelPack, startLevel);
-  // Sprinkle an initial cluster around the centre.
   dropSyllables(10);
 }
 
@@ -692,6 +708,10 @@ function dropSyllables(count) {
 function installLevel(level, silent) {
   state.level = level;
   state.selection = [];
+  state.hintBubbleIds = [];
+  state.hintTTL = 0;
+  // Don't reset hintCooldown on level change — it follows the player across
+  // levels so they can't farm hints by advancing.
   const src = pickLevelSource(level);
   state.levelName = src.name;
   state.levelWords = src.words;
@@ -699,6 +719,8 @@ function installLevel(level, silent) {
   state.wordsThisLevel = currentLevelGuessedCount();
   // Pool = unguessed words from levels 1..N. Rebuilt every match too.
   rebuildPool();
+  // Save guessed-word progress every time a new level is reached.
+  if (levelPack) persistFoundWords(levelPack);
   if (!silent) {
     state.bursts.push({
       x: CANVAS_W / 2, y: CENTER_Y,
@@ -743,6 +765,8 @@ function update(dt) {
     }
   }
   physicsStep(dt);
+  if (state.hintTTL > 0) state.hintTTL = Math.max(0, state.hintTTL - dt);
+  if (state.hintCooldown > 0) state.hintCooldown = Math.max(0, state.hintCooldown - dt);
   for (const burst of state.bursts) {
     burst.t += dt;
     if (burst.falling) {
@@ -794,6 +818,20 @@ function render() {
     }
   }
 
+  // Hint halos (cyan), pulsing while the hint is active.
+  if (state.hintTTL > 0 && state.hintBubbleIds && state.hintBubbleIds.length) {
+    const fade = Math.min(1, state.hintTTL / 1.0);
+    const pulse = 0.55 + 0.35 * Math.sin(performance.now() / 180);
+    ctx.lineWidth = 5;
+    ctx.strokeStyle = `rgba(110, 200, 220, ${(fade * pulse).toFixed(3)})`;
+    for (const id of state.hintBubbleIds) {
+      const b = state.bubbles.find(x => x.id === id);
+      if (!b) continue;
+      drawRoundedRect(b.x - b.w / 2 - 7, b.y - b.h / 2 - 7, b.w + 14, b.h + 14, 14);
+      ctx.stroke();
+    }
+  }
+
   // Bubbles
   for (const b of state.bubbles) {
     let alpha = 1;
@@ -808,6 +846,7 @@ function render() {
   drawHUD();
   drawExitButton();
   drawLevelsButton();
+  drawHintButton();
   drawBursts();
 }
 
@@ -844,12 +883,114 @@ function drawTopButton(rect, label) {
 
 function drawExitButton() { drawTopButton(EXIT_RECT, 'ВЫХОД'); }
 function drawLevelsButton() { drawTopButton(LEVELS_RECT, 'УРОВНИ'); }
+function drawHintButton() {
+  if (!state || state.gameOver) return;
+  const ready = hintAvailable();
+  const r = HINT_RECT;
+  ctx.fillStyle = ready ? 'rgba(28, 31, 42, 0.92)' : 'rgba(40, 42, 54, 0.78)';
+  drawRoundedRect(r.x, r.y, r.w, r.h, 8);
+  ctx.fill();
+  ctx.strokeStyle = ready ? '#5a6173' : '#3a3f4f';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  // Label inside the button — single line, dimmed when on cooldown.
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = ready ? '#d4b483' : '#7d7868';
+  ctx.font = 'bold 14px Georgia';
+  ctx.fillText('ПОДСКАЗКА', r.x + r.w / 2, r.y + r.h / 2);
+  ctx.textBaseline = 'alphabetic';
+  // Countdown sits OUTSIDE the button, just to its right.
+  if (!ready) {
+    const t = Math.ceil(state.hintCooldown);
+    const mm = Math.floor(t / 60), ss = t % 60;
+    const lbl = mm + ':' + (ss < 10 ? '0' : '') + ss;
+    ctx.fillStyle = '#a59a78';
+    ctx.font = 'bold 14px Georgia';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(lbl, r.x + r.w + 10, r.y + r.h / 2);
+    ctx.textBaseline = 'alphabetic';
+  }
+}
 
 function pointInRect(rect, x, y) {
   return x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h;
 }
 function pointInExit(x, y)   { return pointInRect(EXIT_RECT, x, y); }
 function pointInLevels(x, y) { return pointInRect(LEVELS_RECT, x, y); }
+// Click hits if the rect is touched at all — even on cooldown — so we can
+// flash a "wait" notice. The actual gating is in hintAvailable().
+function pointInHint(x, y) {
+  return state && !state.gameOver && pointInRect(HINT_RECT, x, y);
+}
+function hintAvailable() {
+  return !!(state && !state.gameOver && (state.hintCooldown || 0) <= 0);
+}
+
+// Walk the active pool's split map, looking for a word whose every part is
+// already on screen. Returns { word, bubbles } or null.
+function findHint() {
+  if (!syllables || !syllables.splits) return null;
+  // Group on-screen bubbles by their syllable string. (No two should share,
+  // but for safety we still keep an array per key.)
+  const onScreen = new Map();
+  for (const b of state.bubbles) {
+    const arr = onScreen.get(b.syllable) || [];
+    arr.push(b);
+    onScreen.set(b.syllable, arr);
+  }
+  // Iterate splits in random order so repeated hints don't always show the
+  // same word.
+  const entries = [...syllables.splits.entries()];
+  for (let i = entries.length - 1; i > 0; i--) {
+    const j = (Math.random() * (i + 1)) | 0;
+    [entries[i], entries[j]] = [entries[j], entries[i]];
+  }
+  for (const [word, parts] of entries) {
+    if (state.foundLevelWords && state.foundLevelWords.has(word)) continue;
+    const used = new Map(); // copy of onScreen we mutate
+    onScreen.forEach((arr, k) => used.set(k, arr.slice()));
+    const bubbles = [];
+    let ok = true;
+    for (const p of parts) {
+      const arr = used.get(p);
+      if (!arr || !arr.length) { ok = false; break; }
+      bubbles.push(arr.shift());
+    }
+    if (ok) return { word, bubbles };
+  }
+  return null;
+}
+
+function triggerHint() {
+  if (!state || state.gameOver) return;
+  if (state.hintCooldown > 0) {
+    // Still on cooldown — gentle flash so the click isn't silent.
+    const t = Math.ceil(state.hintCooldown);
+    const mm = Math.floor(t / 60), ss = t % 60;
+    state.bursts.push({
+      x: CENTER_X, y: CENTER_Y - 40,
+      text: 'Подсказка через ' + mm + ':' + (ss < 10 ? '0' : '') + ss,
+      color: '#b58cc7',
+      t: 0, dur: 1.4, isText: true,
+    });
+    return;
+  }
+  const h = findHint();
+  if (!h) {
+    state.bursts.push({
+      x: CENTER_X, y: CENTER_Y - 40,
+      text: 'Подсказки нет — попробуйте ПРОБЕЛ',
+      color: '#b58cc7',
+      t: 0, dur: 1.6, isText: true,
+    });
+    return;
+  }
+  state.hintBubbleIds = h.bubbles.map(b => b.id);
+  state.hintTTL = HINT_TTL;
+  state.hintCooldown = HINT_COOLDOWN;
+}
 
 // Stop the running game and bring the player back to the level-pack chooser.
 function exitToMenu() {
@@ -885,16 +1026,28 @@ function showLevelPicker() {
 
 // Replay an already-unlocked level: rebuild a fresh cloud at the chosen index.
 function switchLevel(level) {
-  markLevelStarted(levelPack, level);
-  // Replay: fresh slate for found-words too, otherwise the pool would already
-  // exclude what the player matched in their previous attempt.
-  state.foundLevelWords = new Set();
-  state.foundOtherWords = new Set();
+  // Forget any words guessed at this level or later — the player is
+  // effectively rewinding their progress.
+  if (levelData) {
+    const drop = new Set();
+    for (let i = level; i <= levelData.length; i++) {
+      for (const w of pickLevelSource(i).words) drop.add(w);
+    }
+    for (const w of drop) state.foundLevelWords.delete(w);
+  }
+  // Roll back the unlock watermark too: clicking an earlier level relocks
+  // everything above it. The player has to play forward again.
+  if (levelPack) {
+    const prog = getPackProgress(levelPack);
+    prog.unlocked = level;
+    prog.current  = level;
+    setPackProgress(levelPack, prog);
+  }
   state.bubbles = [];
   state.bursts = [];
   state.selection = [];
   state.draggedId = null;
-  installLevel(level, false);
+  installLevel(level, false); // persistFoundWords runs inside, saving the trim
   dropSyllables(10);
 }
 
@@ -1119,6 +1272,11 @@ function setupInput() {
       e.preventDefault();
       return;
     }
+    if (pointInHint(x, y)) {
+      triggerHint();
+      e.preventDefault();
+      return;
+    }
     const b = bubbleAt(x, y);
     if (!b) {
       // Click on empty space — reset any in-progress selection.
@@ -1242,10 +1400,10 @@ async function startGameWithPack(pack) {
   levelData = data;
   document.getElementById('menu').classList.add('hidden');
   document.getElementById('gameover').classList.add('hidden');
-  // Resume at the player's saved spot, clamped to what's available.
+  // Resume at the player's saved spot with their previously-guessed words.
   const prog = getPackProgress(pack);
   const startLvl = Math.min(Math.max(1, prog.current), levelData.length);
-  initState(startLvl);
+  initState(startLvl, prog);
   requestAnimationFrame(loop);
 }
 
