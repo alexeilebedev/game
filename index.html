@@ -43,6 +43,20 @@
   }
   .overlay h2 { color: #b3a98e; font-size: 22px; letter-spacing: 4px; margin-bottom: 24px; font-weight: normal; }
   .overlay p { max-width: 580px; margin: 6px 0; line-height: 1.55; color: #c9c2b3; font-size: 17px; }
+  .byline {
+    color: #a59a78 !important;
+    font-style: italic;
+    font-size: 16px !important;
+    margin: -6px 0 18px !important;
+    letter-spacing: 1px;
+  }
+  .intro {
+    max-width: 580px;
+    text-align: left;
+    margin: 8px auto 12px;
+  }
+  .intro p { margin: 6px 0; font-size: 15px; line-height: 1.5; color: #c2bba6; }
+  .intro p strong { color: #d4b483; font-weight: 600; }
   .overlay button {
     margin-top: 28px;
     font-family: inherit; font-size: 22px; letter-spacing: 3px;
@@ -86,7 +100,13 @@
 
   <div id="menu" class="overlay">
     <h1>БУКИ ВЕДИ</h1>
-    <p>Кликайте по слогам, чтобы складывать слова. Найдите половину слов уровня, чтобы пройти дальше. Если на экране нечего собрать — нажмите ПРОБЕЛ, чтобы получить ещё пять слогов раньше срока.</p>
+    <p class="byline">по роману Татьяны Толстой «Кысь»</p>
+    <div class="intro">
+      <p><strong>Об игре.</strong> Слова взяты из книги и появляются в порядке возрастания сложности. Уровни названы в честь глав романа.</p>
+      <p><strong>Как играть.</strong> Кликайте по слогам, чтобы складывать слова. Найдите половину слов уровня, чтобы открыть следующий.</p>
+      <p><strong>Очки.</strong> Любое русское слово принимается и приносит очки, но только слова из книги приближают к следующему уровню.</p>
+      <p><strong>Если застряли.</strong> Нажмите <strong>ПРОБЕЛ</strong> — упадут ещё пять слогов. Кнопка <strong>ПОДСКАЗКА</strong> подсветит готовое слово (раз в три минуты).</p>
+    </div>
     <div id="levelChooser" class="level-list"></div>
     <div class="scores" id="highscores"></div>
     <div class="controls">КЛИК — выбрать слог &nbsp;·&nbsp; ESC — сбросить &nbsp;·&nbsp; ПРОБЕЛ — пять слогов раньше</div>
@@ -322,20 +342,23 @@ function getPackProgress(pack) {
       return {
         unlocked:    Math.max(1, p.unlocked | 0 || 1),
         current:     Math.max(1, p.current  | 0 || 1),
+        score:       Number.isFinite(p.score) ? Math.max(0, p.score | 0) : 0,
         foundLevel:  Array.isArray(p.foundLevel)  ? p.foundLevel.slice()  : [],
         foundOther:  Array.isArray(p.foundOther)  ? p.foundOther.slice()  : [],
       };
     }
   } catch (e) { /* ignore */ }
-  return { unlocked: 1, current: 1, foundLevel: [], foundOther: [] };
+  return { unlocked: 1, current: 1, score: 0, foundLevel: [], foundOther: [] };
 }
 function setPackProgress(pack, p) {
   try { localStorage.setItem(packStorageKey(pack), JSON.stringify(p)); } catch (e) {}
 }
-// Persist the in-memory found-words sets back into the saved progress blob.
+// Persist the in-memory progress (score + found-word sets) into the pack's
+// saved blob. Called every time a level is reached.
 function persistFoundWords(pack) {
   if (!pack || !state) return;
   const p = getPackProgress(pack);
+  p.score = state.score | 0;
   p.foundLevel = state.foundLevelWords ? [...state.foundLevelWords] : [];
   p.foundOther = state.foundOtherWords ? [...state.foundOtherWords] : [];
   setPackProgress(pack, p);
@@ -674,7 +697,7 @@ function initState(startLevel, saved) {
     draggedId: null,
     dragOffset: { x: 0, y: 0 },
     mouseX: CENTER_X, mouseY: CENTER_Y,
-    score: 0,
+    score: (saved && Number.isFinite(saved.score)) ? Math.max(0, saved.score | 0) : 0,
     lastT: 0,
     gameOver: false,
     bursts: [],
