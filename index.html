@@ -73,18 +73,19 @@
   .controls { margin-top: 22px; font-size: 13px; color: #7d7868; letter-spacing: 1px; }
   .level-list {
     margin: 26px auto 0;
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    display: flex;
+    flex-wrap: wrap;
     gap: 10px;
-    width: 100%; max-width: 720px;
-    justify-items: stretch;
     justify-content: center;
+    width: 100%; max-width: 720px;
   }
   .level-list button {
     margin-top: 0;
     font-size: 18px;
     padding: 10px 14px;
-    width: 100%;
+    flex: 0 1 calc(33.333% - 7px);
+    min-width: 200px;
+    max-width: 240px;
   }
   .level-list button.locked {
     background: #34384a; color: #6a6657;
@@ -1402,7 +1403,7 @@ function renderLevelChooser() {
   }
   for (const pack of packs) {
     const btn = document.createElement('button');
-    btn.textContent = pack.name || pack.file;
+    btn.textContent = 'ИГРАТЬ';
     btn.addEventListener('click', () => startGameWithPack(pack));
     list.appendChild(btn);
   }
