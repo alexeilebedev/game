@@ -372,9 +372,16 @@ function levelNameAt(level) {
   return e.name || '';
 }
 function levelWordCount(level) { return levelWordsAt(level).length; }
-// More than half of the level's words advances the player. floor(n/2)+1
-// satisfies the strict ">50%" rule (e.g. n=4 → 3, n=10 → 6, n=11 → 6).
-function levelWinTarget(level) { return Math.max(1, Math.floor(levelWordCount(level) / 2) + 1); }
+// Win threshold = ceil(N * pack.nextfrac). Each pack in levels.js declares
+// what fraction of a level's words must be guessed before advancing
+// (defaults to 0.5 if the pack didn't specify). nextfrac = 1.0 means every
+// word on the level has to be found.
+function levelWinTarget(level) {
+  const N = levelWordCount(level);
+  if (N <= 0) return 1;
+  const frac = (levelPack && typeof levelPack.nextfrac === 'number') ? levelPack.nextfrac : 0.5;
+  return Math.max(1, Math.min(N, Math.ceil(N * frac)));
+}
 
 // All distinct, sanitised words across levels 1..upTo (inclusive).
 function poolWordsUpTo(upTo) {
@@ -1722,7 +1729,7 @@ function renderLevelChooser() {
   }
   for (const pack of packs) {
     const btn = document.createElement('button');
-    btn.textContent = 'ИГРАТЬ';
+    btn.textContent = pack.name;
     btn.addEventListener('click', () => startGameWithPack(pack));
     list.appendChild(btn);
   }
