@@ -7,7 +7,7 @@
 window.LEVELS = [
   { name: "Простые Слова", file: "simplewords.js",  nextfrac: 1.0 },
   { name: "Айболит",        file: "aibolit.js",     nextfrac: 0.5 },
-  { name: "Кошкин Домё",    file: "koshkindom.js",  nextfrac: 0.5 },
+  { name: "Кошкин Дом",    file: "koshkindom.js",  nextfrac: 0.5 },
   { name: "Хоббит",         file: "hobbit.js",      nextfrac: 0.5 },
   { name: "Кысь",           file: "kys.js",         nextfrac: 0.5 }
 ];
