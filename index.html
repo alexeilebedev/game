@@ -130,9 +130,8 @@
 
   <div id="menu" class="overlay">
     <h1>БУКИ ВЕДИ</h1>
-    <p class="byline">по роману Татьяны Толстой «Кысь»</p>
     <div class="intro">
-      <p><strong>Об игре.</strong> Слова взяты из книги и появляются в порядке возрастания сложности. Уровни названы в честь глав романа.</p>
+      <p><strong>Об игре.</strong> Выберите набор уровней — слова в нём появляются в порядке возрастания сложности.</p>
       <p><strong>Как играть.</strong> Кликайте по слогам, чтобы складывать слова. Найдите больше половины слов уровня и расчистите тучу — тогда откроется следующий уровень.</p>
       <p><strong>Если застряли.</strong> Нажмите <strong>ПРОБЕЛ</strong> — упадут ещё пять слогов. Кнопка <strong>ПОДСКАЗКА</strong> подсветит готовое слово (раз в полторы минуты).</p>
     </div>
@@ -181,7 +180,6 @@ const COLLISION_ITERS = 6;     // positional-correction passes per frame
 const EXIT_RECT    = { x: 0, y: 0, w: 0, h: 0 };
 const LEVELS_RECT  = { x: 0, y: 0, w: 0, h: 0 };
 const HINT_RECT    = { x: 0, y: 0, w: 0, h: 0 };
-const MORE_RECT    = { x: 0, y: 0, w: 0, h: 0 };
 const COUNTER_RECT = { x: 0, y: 0, w: 0, h: 0 };
 let uiScale = 1.0;
 const HINT_COOLDOWN = 90;  // seconds between hint uses (1:30)
@@ -210,11 +208,8 @@ function recomputeButtonLayout() {
   LEVELS_RECT.x = EXIT_RECT.x + EXIT_RECT.w + gap;
   LEVELS_RECT.y = y; LEVELS_RECT.w = levelsW; LEVELS_RECT.h = h;
   const hintW = Math.round(140 * uiScale);
-  HINT_RECT.x = LEVELS_RECT.x + LEVELS_RECT.w + Math.round(20 * uiScale);
+  HINT_RECT.x = CANVAS_W - hintW - x0;
   HINT_RECT.y = y; HINT_RECT.w = hintW; HINT_RECT.h = h;
-  const moreW = Math.round(96 * uiScale);
-  MORE_RECT.x = CANVAS_W - moreW - x0;
-  MORE_RECT.y = y; MORE_RECT.w = moreW; MORE_RECT.h = h;
 }
 
 if (typeof window !== 'undefined') window.addEventListener('resize', updateUiScale);
@@ -805,9 +800,7 @@ function burnWord(match) {
   if (state.wordsThisLevel >= state.wordsToWin && state.bubbles.length < 20) levelUp();
 }
 
-function spawnNewBubble() {
-  const syl = nextSyllable();
-  if (!syl) return; // every eligible syllable is banned or already on screen
+function spawnBubbleWithSyllable(syl) {
   const angle = Math.random() * Math.PI * 2;
   const dist = 480;
   const x = CENTER_X + Math.cos(angle) * dist;
@@ -818,6 +811,26 @@ function spawnNewBubble() {
   b.vx = (dx / d) * 280;
   b.vy = (dy / d) * 280;
   state.bubbles.push(b);
+}
+
+function spawnNewBubble() {
+  const syl = nextSyllable();
+  if (!syl) return; // every eligible syllable is banned or already on screen
+  spawnBubbleWithSyllable(syl);
+}
+
+// Spawn one bubble per syllable for every unguessed word in the current
+// level — so reaching a level makes that level's full syllable inventory
+// visible immediately.
+function dropCurrentLevelSyllables() {
+  if (!state || !state.levelWords) return;
+  const found = state.foundLevelWords || new Set();
+  for (const w of state.levelWords) {
+    if (found.has(w)) continue;
+    const split = state.wordSplits && state.wordSplits.get(w);
+    if (!split) continue;
+    for (const syl of split) spawnBubbleWithSyllable(syl);
+  }
 }
 
 // ---- Score schedule (kept) -------------------------------------------------
@@ -860,9 +873,10 @@ function initState(startLevel, saved) {
     endingShown: false,
     autoSaveT: 0,
   };
-  installLevel(startLevel, true);
+  const isResume = !!(saved && (startLevel > 1 || restoredLevel.length > 0));
+  installLevel(startLevel, !isResume);
   if (levelPack) markLevelStarted(levelPack, startLevel);
-  dropSyllables(10);
+  dropCurrentLevelSyllables();
 }
 
 // Drop up to `count` new syllables in from outside the cloud. Each one chooses
@@ -919,7 +933,7 @@ function levelUp() {
     return;
   }
   installLevel(state.level + 1, false);
-  dropSyllables(10);
+  dropCurrentLevelSyllables();
 }
 
 // ---- Update / render --------------------------------------------------------
@@ -1023,7 +1037,6 @@ function render() {
   drawExitButton();
   drawLevelsButton();
   drawHintButton();
-  drawMoreButton();
   drawBursts();
 }
 
@@ -1072,39 +1085,21 @@ function drawHintButton() {
     const lbl = mm + ':' + (ss < 10 ? '0' : '') + ss;
     ctx.fillStyle = '#a59a78';
     ctx.font = 'bold ' + Math.round(15 * uiScale) + 'px Georgia';
-    ctx.textAlign = 'left';
+    ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
-    ctx.fillText(lbl, HINT_RECT.x + HINT_RECT.w + Math.round(10 * uiScale), HINT_RECT.y + HINT_RECT.h / 2);
+    ctx.fillText(lbl, HINT_RECT.x - Math.round(10 * uiScale), HINT_RECT.y + HINT_RECT.h / 2);
     ctx.textBaseline = 'alphabetic';
   }
 }
-function drawMoreButton() {
-  if (!state || state.gameOver) return;
-  drawTopButton(MORE_RECT, 'ЕЩЁ', { lit: syllablesAvailable() > 0 });
-}
-
 function pointInRect(rect, x, y) {
   return x >= rect.x && x <= rect.x + rect.w && y >= rect.y && y <= rect.y + rect.h;
 }
 function pointInExit(x, y)   { return pointInRect(EXIT_RECT, x, y); }
 function pointInLevels(x, y) { return pointInRect(LEVELS_RECT, x, y); }
 function pointInHint(x, y)   { return state && !state.gameOver && pointInRect(HINT_RECT, x, y); }
-function pointInMore(x, y)   { return state && !state.gameOver && pointInRect(MORE_RECT, x, y); }
 function hintAvailable() {
   return !!(state && !state.gameOver && (state.hintCooldown || 0) <= 0);
 }
-// Sum of pool capacity not yet on screen — drives the "ЕЩЁ" button's lit state.
-function syllablesAvailable() {
-  if (!syllables || !syllables.counts) return 0;
-  const onScreen = new Map();
-  if (state && state.bubbles) {
-    for (const b of state.bubbles) onScreen.set(b.syllable, (onScreen.get(b.syllable) || 0) + 1);
-  }
-  let total = 0;
-  for (const [syl, cnt] of syllables.counts) total += Math.max(0, cnt - (onScreen.get(syl) || 0));
-  return total;
-}
-
 // Find a word whose every split part is currently on screen. If the player
 // has clicked some syllables (`state.selection`), the hint is biased to a
 // word whose split CONTAINS those selected syllables (multiset-wise) — so it
@@ -1300,7 +1295,7 @@ function switchLevel(level) {
   state.selection = [];
   state.draggedId = null;
   installLevel(level, false); // persistFoundWords runs inside, saving the trim
-  dropSyllables(10);
+  dropCurrentLevelSyllables();
 }
 
 // ---- Static drawing helpers -------------------------------------------------
@@ -1614,11 +1609,6 @@ function setupInput() {
     }
     if (pointInHint(x, y)) {
       triggerHint();
-      e.preventDefault();
-      return;
-    }
-    if (pointInMore(x, y)) {
-      if (syllablesAvailable() > 0) dropSyllables(5);
       e.preventDefault();
       return;
     }
